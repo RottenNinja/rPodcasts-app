@@ -16,6 +16,7 @@ flutter run
 Sign in with your server's address and password.
 
 - Linux needs `libmpv-dev` to build and `libmpv` to run.
+- Windows needs Visual Studio with the "Desktop development with C++" workload.
 - iOS and macOS: set your own team and bundle identifier in Xcode.
 - Android: a release build is signed with the debug key unless `android/key.properties` names your own keystore (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`).
 
