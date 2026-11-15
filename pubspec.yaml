@@ -1,0 +1,41 @@
+name: podcasts
+description: "rPodcasts: the app for a self-hosted rPodcasts server."
+publish_to: 'none'
+# Rewritten from /VERSION by `make sync-version`, which every make build and publish runs first.
+version: 1.1.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  audio_service: ^0.18.19
+  background_downloader: ^9.5.9
+  file_selector: ^1.1.0
+  flutter:
+    sdk: flutter
+  flutter_secure_storage: ^11.2.0
+  http: ^1.6.0
+  just_audio: ^0.10.6
+  media_kit: ^1.2.6
+  media_kit_libs_video: ^1.0.7
+  media_kit_video: ^2.0.1
+  path: ^1.9.1
+  path_provider: ^2.1.6
+  path_provider_platform_interface: ^2.1.2
+  sqflite: ^2.4.6
+  sqflite_common_ffi: ^2.4.7
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  # App Store screenshots: integration_test/screenshots.dart, run by tools/ios/tart-screenshots.sh
+  integration_test:
+    sdk: flutter
+  flutter_driver:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/logo/logo-1024.png
