@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart' as ja;
@@ -77,9 +78,12 @@ class _JustAudio implements _Engine {
 }
 
 class _MediaKit implements _Engine {
-  _MediaKit() : video = null;
+  _MediaKit({required this.session}) : video = null;
   final mk.Player p = mk.Player(configuration: const mk.PlayerConfiguration(logLevel: mk.MPVLogLevel.warn));
   mkv.VideoController? video;
+
+  /// On a phone, where media_kit doesn't ask for the sound itself, so other apps would play on over it.
+  final AudioSession? session;
   @override
   Future<void> open(String url, Duration start) async {
     // media_kit's 5 s default is shorter than a joined stream takes to send its first byte.
@@ -90,7 +94,11 @@ class _MediaKit implements _Engine {
   }
 
   @override
-  Future<void> play() => p.play();
+  Future<void> play() async {
+    await session?.setActive(true);
+    await p.play();
+  }
+
   @override
   Future<void> pause() => p.pause();
   @override
@@ -178,7 +186,27 @@ class PlayerController extends ChangeNotifier {
   int _stuck = 0;
   bool _ending = false;
   bool _skipping = false;
+
+  /// Whether the episode plays from a file on this device, which has no connection to lose.
+  bool _local = false;
+
+  /// Reopens since the episode last played on for a while; a broken connection is opened again a few times before it counts as a failure.
+  int _retries = 0;
+  int _retryFrom = 0;
+
+  /// The connection broke or may have while paused, so Play opens the episode again where it is.
+  bool _stale = false;
+  DateTime? _pausedAt;
   SystemControls? handler;
+
+  /// The phone's audio session, which a video claims as it plays; just_audio claims it for audio itself.
+  AudioSession? _session;
+
+  /// A call or another app's short sound paused the video, which plays on once it is over.
+  bool _resumeAfterInterruption = false;
+
+  /// The Next episode button over a video was swiped away, for this episode.
+  bool nextHidden = false;
 
   mkv.VideoController? get video => _engine is _MediaKit ? (_engine as _MediaKit).video : null;
   bool get playing => _engine?.playing ?? false;
@@ -204,10 +232,12 @@ class PlayerController extends ChangeNotifier {
   /// [reveal] says the caller isn't the episode's own page, so a video needs the player brought up.
   Future<void> start(Episode e, {String from = '', int? at, required bool reveal}) {
     if (reveal) asked++;
+    _retries = 0;
     return _play(e, from: from, at: at);
   }
 
-  Future<void> _play(Episode e, {required String from, int? at}) async {
+  /// [keepSpeed] carries the speed over when the same episode is opened again.
+  Future<void> _play(Episode e, {required String from, int? at, int? keepSpeed}) async {
     await _savePosition();
     await _teardown();
     episode = e;
@@ -215,14 +245,18 @@ class PlayerController extends ChangeNotifier {
     error = '';
     skipNext = false;
     showNotice = false;
+    nextHidden = false;
+    _resumeAfterInterruption = false;
     _ending = false;
     joined = false;
     offset = 0;
     _streamLength = 0;
+    _stale = false;
+    _pausedAt = null;
     chapters = [];
     final ch = lib.channelOf(e);
     final pl = lib.play(e.id);
-    speed = ch?.speed ?? 100;
+    speed = keepSpeed ?? ch?.speed ?? 100;
     var start = at ?? (pl.inProgress ? pl.position : (ch?.skipStart ?? 0));
     next = lib.nextAfter(from, e.id);
     autoNext = lib.autoplays(from);
@@ -230,7 +264,7 @@ class PlayerController extends ChangeNotifier {
     _stuck = 0;
     // The player exists before its address is known, so a video shows its picture area, loading, at once.
     final video = e.media == 'video';
-    final engine = (video || isDesktop) ? _MediaKit() : _JustAudio();
+    final engine = (video || isDesktop) ? _MediaKit(session: _session) : _JustAudio();
     if (engine is _MediaKit && video) engine.video = mkv.VideoController(engine.p);
     _engine = engine;
     final asking = ++_asking;
@@ -238,9 +272,10 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
     String url;
     final local = lib.downloaded[e.id];
-    if (local != null && File(local).existsSync()) {
-      url = local;
-    } else if (e.direct) {
+    _local = local != null && File(local).existsSync();
+    if (_local) {
+      url = local!;
+    } else if (!e.streamed) {
       url = e.mediaUrl;
     } else {
       try {
@@ -288,7 +323,48 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> _attachSession() async {
+    final s = await AudioSession.instance;
+    await s.configure(const AudioSessionConfiguration.music());
+    s.interruptionEventStream.listen(_interrupted);
+    s.becomingNoisyEventStream.listen((_) => _soundGone());
+    _session = s;
+  }
+
+  _MediaKit? get _claimed => _engine is _MediaKit && _session != null ? _engine as _MediaKit : null;
+
+  /// Another app took the sound for a video; just_audio does the same for audio by itself.
+  Future<void> _interrupted(AudioInterruptionEvent ev) async {
+    final e = _claimed;
+    if (e == null) return;
+    if (ev.type == AudioInterruptionType.duck) return e.p.setVolume(ev.begin ? 50 : 100);
+    if (ev.begin) {
+      if (!e.playing) return;
+      _resumeAfterInterruption = ev.type == AudioInterruptionType.pause;
+      await e.pause();
+      await _savePosition();
+    } else if (_resumeAfterInterruption && !e.playing) {
+      _resumeAfterInterruption = false;
+      _moving = _primed = false;
+      await e.play();
+    }
+  }
+
+  /// Headphones came out during a video.
+  Future<void> _soundGone() async {
+    final e = _claimed;
+    if (e == null || !e.playing) return;
+    await e.pause();
+    await _savePosition();
+  }
+
+  void hideNext() {
+    nextHidden = true;
+    notifyListeners();
+  }
+
   void _shown() {
+    _pausedAt = playing ? null : (_pausedAt ?? DateTime.now());
     handler?.show(this);
     notifyListeners();
   }
@@ -316,6 +392,7 @@ class PlayerController extends ChangeNotifier {
     // Only an episode seen moving can have been stopped; one still opening or seeking has not started.
     if (!_moving || ++_stuck < 3) return;
     _moving = _primed = false;
+    _stale = !_local;
     await e.pause();
     await _savePosition();
     _shown();
@@ -325,8 +402,29 @@ class PlayerController extends ChangeNotifier {
     debugPrint('player error: $err');
     // A joined stream can't be seeked in; the player says so and plays on.
     if (err.contains('force-seekable') || err.contains('Cannot seek in this stream')) return;
+    // A dropped connection plays on from what is buffered, so it is opened again now, or on Play when paused.
+    if (_canRetry) {
+      if (playing) {
+        unawaited(_reopen());
+      } else {
+        _stale = true;
+      }
+      return;
+    }
     error = 'Could not play: $err';
     notifyListeners();
+  }
+
+  bool get _canRetry => !_local && !loading && _retries < 3 && episode != null;
+
+  /// Opens the episode again where it is, with a fresh stream link, keeping its speed.
+  Future<void> _reopen() async {
+    final e = episode;
+    if (e == null) return;
+    _retries++;
+    _retryFrom = position;
+    debugPrint('player: reopening at ${_retryFrom}s (try $_retries)');
+    await _play(e, from: from, at: _retryFrom, keepSpeed: speed);
   }
 
   Future<void> _loadChapters(Episode e) async {
@@ -345,6 +443,7 @@ class PlayerController extends ChangeNotifier {
     final notice = d > 0 && next != null && autoNext && from.startsWith('playlist:') && !skipNext && end - t < 30 && end - t > 0;
     if (notice != showNotice) showNotice = notice;
     if (d > 0 && (lib.channelOf(e)?.skipEnd ?? 0) > 0 && t >= end) unawaited(_finish());
+    if (_retries > 0 && t - _retryFrom > 60) _retries = 0;
     if (t != _lastTick) {
       _lastTick = t;
       handler?.show(this);
@@ -362,6 +461,7 @@ class PlayerController extends ChangeNotifier {
   Future<void> _ended() async {
     final d = duration, short = d - position > (d > 600 ? d ~/ 10 : 60);
     if (error.isEmpty && !short) return _finish();
+    if (error.isEmpty && _canRetry) return _reopen();
     await _engine?.pause();
     await _savePosition();
     if (error.isEmpty) error = 'Playback stopped before the end of the episode. Press play to carry on from here.';
@@ -393,11 +493,18 @@ class PlayerController extends ChangeNotifier {
     if (_engine == null || loading) return;
     // After a failure there is nothing open to resume, so Play opens the episode again where it stopped.
     final e = episode;
+    _resumeAfterInterruption = false;
     if (error.isNotEmpty && e != null) return _play(e, from: from);
     if (playing) {
       await _engine!.pause();
       await _savePosition();
     } else {
+      // A stream paused for long has lost its connection, and its link may have run out.
+      final paused = _pausedAt;
+      if (e != null && !_local && (_stale || (paused != null && DateTime.now().difference(paused) > const Duration(minutes: 5)))) {
+        _retries = 0;
+        return _play(e, from: from, at: position, keepSpeed: speed);
+      }
       _moving = _primed = false;
       await _engine!.play();
     }
@@ -441,6 +548,17 @@ class PlayerController extends ChangeNotifier {
     speed = s;
     await _engine?.setSpeed(s / 100);
     notifyListeners();
+    final e = episode;
+    if (e != null && lib.prefs.rememberSpeed) unawaited(_rememberSpeed(e.channelId, s));
+  }
+
+  Future<void> _rememberSpeed(int channel, int s) async {
+    try {
+      await api.post('/channels/$channel/speed', {'speed': '$s'});
+      await lib.setChannelSpeed(channel, s);
+    } on Object catch (err) {
+      await lib.db.event('sync', 'Could not save the speed for "${lib.channels[channel]?.title ?? channel}": $err');
+    }
   }
 
   void setSleep(String v) {
@@ -579,6 +697,13 @@ class SystemControls extends BaseAudioHandler with SeekHandler {
 /// Connects the system media controls where the platform has them.
 Future<void> attachSystemControls(PlayerController c) async {
   if (kIsWeb || Platform.isLinux || Platform.isWindows) return;
+  if (!isDesktop) {
+    try {
+      await c._attachSession();
+    } catch (e) {
+      debugPrint('audio session unavailable: $e');
+    }
+  }
   try {
     c.handler = await AudioService.init(
       builder: () => SystemControls(c),

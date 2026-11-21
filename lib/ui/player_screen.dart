@@ -108,7 +108,10 @@ class _EpisodeScreenState extends State<_EpisodeScreen> {
     final s = Scope.of(context);
     Navigator.of(context, rootNavigator: true).push(
       PageRouteBuilder<void>(
-        pageBuilder: (_, _, _) => Scope(services: s, child: const _FullscreenVideo()),
+        pageBuilder: (_, _, _) => Scope(
+          services: s,
+          child: _FullscreenVideo(sideways: !isDesktop && s.lib.device.videoLandscape && !_portrait(s.player)),
+        ),
         transitionsBuilder: (_, a, _, child) => FadeTransition(opacity: a, child: child),
       ),
     );
@@ -267,7 +270,13 @@ class _EpisodeScreenState extends State<_EpisodeScreen> {
                                       children: [
                                         const ColoredBox(color: Colors.black),
                                         if (art.isNotEmpty)
-                                          Image(image: CachedArt(art, s.art), fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox.shrink()),
+                                          Image(
+                                          image: CachedArt(art, s.art),
+                                          fit: BoxFit.cover,
+                                          errorBuilder: (_, _, _) => (ch?.artwork ?? '').isEmpty || ch!.artwork == art
+                                              ? const SizedBox.shrink()
+                                              : Image(image: CachedArt(ch.artwork, s.art), fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox.shrink()),
+                                        ),
                                         Center(
                                           child: IconButton(
                                             style: IconButton.styleFrom(backgroundColor: Colors.black45, foregroundColor: Colors.white),
@@ -302,7 +311,7 @@ class _EpisodeScreenState extends State<_EpisodeScreen> {
                                     boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 32, offset: const Offset(0, 14))],
                                   ),
                                   // Small enough on a short screen that the controls and the tabs under them are in view.
-                                  child: Artwork(art, size: (box.maxWidth - 48).clamp(120.0, (box.maxHeight * 0.38).clamp(120.0, 320.0))),
+                                  child: Artwork(art, size: (box.maxWidth - 48).clamp(120.0, (box.maxHeight * 0.38).clamp(120.0, 320.0)), fallback: ch?.artwork ?? ''),
                                 ),
                               ),
                               const SizedBox(height: 24),
@@ -674,7 +683,13 @@ class _VideoStageState extends State<VideoStage> {
               fit: StackFit.expand,
               children: [
                 // Keyed, as Video only watches its first controller, so the next episode would lose the wakelock.
-                Video(key: ObjectKey(video), controller: video, controls: NoVideoControls, wakelock: true),
+                Video(
+                  key: ObjectKey(video),
+                  controller: video,
+                  controls: NoVideoControls,
+                  wakelock: true,
+                  pauseUponEnteringBackgroundMode: !s.lib.device.videoInBackground,
+                ),
                 if (p.buffering)
                   const Center(
                     child: SizedBox(width: 44, height: 44, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3)),
@@ -806,17 +821,21 @@ class _VideoStageState extends State<VideoStage> {
                   ),
                 ),
                 // Offered whether or not the controls are showing, like the end of an episode on a streaming service.
-                if (p.offerNext)
+                if (p.offerNext && !p.nextHidden)
                   Positioned(
                     right: 16,
                     bottom: 64,
                     child: SafeArea(
                       top: false,
-                      child: FilledButton.icon(
-                        style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
-                        onPressed: p.finishToNext,
-                        icon: const Icon(Icons.skip_next_rounded),
-                        label: const Text('Next episode'),
+                      child: Dismissible(
+                        key: ObjectKey(e),
+                        onDismissed: (_) => p.hideNext(),
+                        child: FilledButton.icon(
+                          style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+                          onPressed: p.finishToNext,
+                          icon: const Icon(Icons.skip_next_rounded),
+                          label: const Text('Next episode'),
+                        ),
                       ),
                     ),
                   ),
@@ -829,17 +848,25 @@ class _VideoStageState extends State<VideoStage> {
   }
 }
 
-// Hides the system bars on a phone and fills the monitor on a desktop; turning the phone is left to its owner.
-Future<void> _nativeFullscreen({required bool on}) {
+// Hides the system bars on a phone and fills the monitor on a desktop; [sideways] turns a phone to landscape.
+Future<void> _nativeFullscreen({required bool on, required bool sideways}) async {
   if (isDesktop) return on ? defaultEnterNativeFullscreen() : defaultExitNativeFullscreen();
-  return on
+  await SystemChrome.setPreferredOrientations(on && sideways ? const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight] : const []);
+  await (on
       ? SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky)
-      : SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values);
+      : SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values));
+}
+
+// A picture not yet open counts as wide, as most are.
+bool _portrait(PlayerController p) {
+  final st = p.video?.player.state;
+  return st != null && (st.width ?? 0) > 0 && (st.height ?? 0) > (st.width ?? 0);
 }
 
 /// The picture alone on a black screen, whichever way up the device is held.
 class _FullscreenVideo extends StatefulWidget {
-  const _FullscreenVideo();
+  const _FullscreenVideo({required this.sideways});
+  final bool sideways;
   @override
   State<_FullscreenVideo> createState() => _FullscreenVideoState();
 }
@@ -853,12 +880,12 @@ class _FullscreenVideoState extends State<_FullscreenVideo> {
   @override
   void initState() {
     super.initState();
-    _nativeFullscreen(on: true);
+    _nativeFullscreen(on: true, sideways: widget.sideways);
   }
 
   @override
   void dispose() {
-    _nativeFullscreen(on: false);
+    _nativeFullscreen(on: false, sideways: false);
     super.dispose();
   }
 

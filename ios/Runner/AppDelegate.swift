@@ -1,9 +1,12 @@
 import Flutter
+import Network
 import UIKit
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, UIDocumentPickerDelegate {
   private var saving: FlutterResult?
+  // Watched from launch, so asking whether the phone has internet answers at once.
+  private let path = NWPathMonitor()
 
   override func application(
     _ application: UIApplication,
@@ -13,11 +16,16 @@ import UIKit
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    path.start(queue: DispatchQueue(label: "rpodcasts.path"))
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     // The name shown on the server's Devices page, so sign-in needn't ask for one.
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "DeviceName") {
       FlutterMethodChannel(name: "rpodcasts/device", binaryMessenger: registrar.messenger()).setMethodCallHandler { call, result in
-        result(call.method == "name" ? UIDevice.current.name : FlutterMethodNotImplemented)
+        switch call.method {
+        case "name": result(UIDevice.current.name)
+        case "online": result(self.path.currentPath.status == .satisfied)
+        default: result(FlutterMethodNotImplemented)
+        }
       }
     }
     // Saves text through the system "save to" picker, so the user chooses where the file goes.

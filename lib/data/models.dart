@@ -69,6 +69,9 @@ class Episode {
   String get chaptersUrl => _s(json['chapters_url']);
   String get transcriptUrl => _s(json['transcript_url']);
   bool get direct => mediaUrl.isNotEmpty;
+
+  /// Played and downloaded through the server: videos, re-encoded to the podcast's quality, and anything without its own enclosure.
+  bool get streamed => !direct || media == 'video';
 }
 
 /// The listener's state of one episode, with the time each field last changed (unix ms).
@@ -156,6 +159,9 @@ class Playlist {
   String get builtin => _s(json['builtin']);
   bool get autoplay => _b(json['autoplay']);
 
+  /// Lists only unplayed episodes; the played ones are still in the playlist.
+  bool get hidePlayed => _b(json['hide_played']);
+
   /// Fixes the shuffled order: the playlist's own id until it is reshuffled.
   int get seed => _i(json['seed']) == 0 ? id : _i(json['seed']);
 }
@@ -168,6 +174,9 @@ class Prefs {
   int get skipForward => _i(json['skip_forward']) == 0 ? 30 : _i(json['skip_forward']);
   int get nextAt => _i(json['next_at']) == 0 ? 5 : _i(json['next_at']);
   String get theme => _s(json['theme']).isEmpty ? 'system' : _s(json['theme']);
+
+  /// A speed changed while playing becomes the podcast's own, on every device.
+  bool get rememberSpeed => _b(json['remember_speed']);
 }
 
 class PlaylistDevice {
@@ -185,6 +194,20 @@ class DeviceSettings {
   bool get wifiOnly => !isDesktop && (json['wifi_only'] == null || _b(json['wifi_only']));
   bool get wifiOnlySaved => json['wifi_only'] == null || _b(json['wifi_only']);
   String get deleteAfter => _s(json['delete_after']).isEmpty ? '1d' : _s(json['delete_after']);
+
+  /// Nothing downloads by itself, for a hotspot or roaming; a tap on Download still does.
+  bool get downloadsPaused => _b(json['downloads_paused']);
+
+  DeviceSettings withPaused(bool paused) => DeviceSettings({...json, 'downloads_paused': paused});
+
+  /// A video plays on, as sound, when the app goes to the background.
+  bool get videoInBackground => _b(json['video_background']);
+
+  /// Full screen turns the phone sideways for a video wider than it is tall.
+  bool get videoLandscape => _b(json['video_landscape']);
+
+  DeviceSettings withVideo({required bool background, required bool landscape}) =>
+      DeviceSettings({...json, 'video_background': background, 'video_landscape': landscape});
 
   /// Playlists not set to download are streamed.
   PlaylistDevice forPlaylist(int id) {

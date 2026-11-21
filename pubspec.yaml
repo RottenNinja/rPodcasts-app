@@ -2,13 +2,14 @@ name: podcasts
 description: "rPodcasts: the app for a self-hosted rPodcasts server."
 publish_to: 'none'
 # Rewritten from /VERSION by `make sync-version`, which every make build and publish runs first.
-version: 1.1.0+1
+version: 1.2.0+1
 
 environment:
   sdk: ^3.12.2
 
 dependencies:
   audio_service: ^0.18.19
+  audio_session: ^0.2.4
   background_downloader: ^9.5.9
   file_selector: ^1.1.0
   flutter:

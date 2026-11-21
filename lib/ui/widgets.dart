@@ -51,8 +51,11 @@ String ago(DateTime? t) {
 String shortDate(DateTime? t) => t == null ? '' : (t.year == DateTime.now().year ? '${t.day} ${_months[t.month - 1]}' : date(t));
 
 class Artwork extends StatelessWidget {
-  const Artwork(this.url, {super.key, this.size = 48, this.video = false, this.rounded = true});
+  const Artwork(this.url, {super.key, this.size = 48, this.video = false, this.rounded = true, this.fallback = ''});
   final String url;
+
+  /// Shown instead when [url] can't be loaded, such as an episode's picture that has gone from its host.
+  final String fallback;
   final double size;
   final bool video;
   final bool rounded;
@@ -80,7 +83,7 @@ class Artwork extends StatelessWidget {
                 height: size,
                 fit: BoxFit.cover,
                 gaplessPlayback: true,
-                errorBuilder: (_, _, _) => ph,
+                errorBuilder: (_, _, _) => fallback.isEmpty || fallback == url ? ph : Artwork(fallback, size: size, video: video, rounded: false),
               ),
             ),
     );
@@ -121,32 +124,23 @@ class EpisodeTile extends StatelessWidget {
     final s = Scope.of(context);
     final p = s.lib.play(e.id);
     final row = _row(context);
-    // Swiping right marks played or unplayed and swiping left stars or unstars.
+    // Only a swipe right, to mark played or unplayed: a swipe in from the right edge is Android's Back.
     if (onSelect != null) return row;
     return Dismissible(
       key: ValueKey('swipe-${e.id}'),
-      dismissThresholds: const {DismissDirection.startToEnd: 0.25, DismissDirection.endToStart: 0.25},
+      direction: DismissDirection.startToEnd,
+      dismissThresholds: const {DismissDirection.startToEnd: 0.25},
       // The row stays; the swipe only carries out the action.
-      confirmDismiss: (dir) async {
+      confirmDismiss: (_) async {
         HapticFeedback.selectionClick();
-        if (dir == DismissDirection.startToEnd) {
-          await s.player.setPlayed([e.id], !p.played);
-        } else {
-          await s.lib.mark(e.id, 'starred', !p.starred);
-        }
+        await s.player.setPlayed([e.id], !p.played);
         return false;
       },
       background: _swipeHint(
         context,
-        icon: p.played ? Icons.radio_button_unchecked_rounded : Icons.check_circle_rounded,
+        icon: p.played ? Icons.remove_done_rounded : Icons.check_circle_rounded,
         label: p.played ? 'Unplayed' : 'Played',
         start: true,
-      ),
-      secondaryBackground: _swipeHint(
-        context,
-        icon: p.starred ? Icons.star_outline_rounded : Icons.star_rounded,
-        label: p.starred ? 'Unstar' : 'Star',
-        start: false,
       ),
       child: Material(color: Theme.of(context).colorScheme.surface, child: row),
     );
@@ -192,7 +186,7 @@ class EpisodeTile extends StatelessWidget {
                   children: [
                     Opacity(
                       opacity: p.played && !selected ? 0.55 : 1,
-                      child: Artwork(e.artwork.isNotEmpty ? e.artwork : ch?.artwork ?? '', size: 56, video: e.media == 'video'),
+                      child: Artwork(e.artwork.isNotEmpty ? e.artwork : ch?.artwork ?? '', size: 56, video: e.media == 'video', fallback: ch?.artwork ?? ''),
                     ),
                     if (selected)
                       CircleAvatar(
@@ -504,6 +498,7 @@ class _StatusBadgeState extends State<StatusBadge> {
   int server = 0;
   bool failed = false;
   Timer? timer;
+  bool _asking = false;
 
   @override
   void didChangeDependencies() {
@@ -513,6 +508,8 @@ class _StatusBadgeState extends State<StatusBadge> {
   }
 
   Future<void> _poll() async {
+    if (_asking) return;
+    _asking = true;
     try {
       final st = await Scope.of(context).api.get('/status') as Map;
       final hist = st['history'] as List;
@@ -523,7 +520,10 @@ class _StatusBadgeState extends State<StatusBadge> {
           failed = last != null && last['state'] == 'failed';
         });
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      _asking = false;
+    }
   }
 
   @override
@@ -617,11 +617,16 @@ class MiniPlayer extends StatelessWidget {
                                 child: SizedBox(
                                   width: 78,
                                   height: 44,
-                                  child: Video(controller: p.video!, controls: NoVideoControls, wakelock: false),
+                                  child: Video(
+                                    controller: p.video!,
+                                    controls: NoVideoControls,
+                                    wakelock: false,
+                                    pauseUponEnteringBackgroundMode: !s.lib.device.videoInBackground,
+                                  ),
                                 ),
                               )
                             else
-                              Artwork(e.artwork.isNotEmpty ? e.artwork : ch?.artwork ?? '', size: 44, video: e.media == 'video'),
+                              Artwork(e.artwork.isNotEmpty ? e.artwork : ch?.artwork ?? '', size: 44, video: e.media == 'video', fallback: ch?.artwork ?? ''),
                             const SizedBox(width: 12),
                             Expanded(
                               child: Column(

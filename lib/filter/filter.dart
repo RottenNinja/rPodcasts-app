@@ -112,8 +112,8 @@ _Key? _key(FilterEnv e, String name) {
       return const _Key('title', _Kind.text, []);
     case 'title.length' || 'season' || 'number':
       return _Key(name, _Kind.number, const []);
-    case 'channel':
-      return _Key(name, _Kind.choice, e.channels);
+    case 'channel' || 'podcast':
+      return _Key('channel', _Kind.choice, e.channels);
     case 'length' || 'left':
       return _Key(name, _Kind.duration, const []);
     case 'published':
@@ -355,6 +355,8 @@ class _Parser {
     final flag = _boolKeys.contains(name);
     final k = _key(env, name);
     if (k == null && !flag) throw fail(start, 'unknown key \$$name');
+    // $podcast is saved as $channel, the only name older apps read.
+    if (name == 'podcast') f.spans.add(Span(ns, pos, 'alias', 'channel'));
     final nameEnd = pos;
     ws();
     final opPos = pos;
@@ -857,11 +859,11 @@ String quoteLabel(String label) {
   return label;
 }
 
-/// Swaps channel labels for ids, so renames never break the filter.
+/// Swaps channel labels for ids, so renames never break the filter, and $podcast for $channel.
 (String?, FilterError?) toStored(String src, FilterEnv env) {
   final r = parseFilter(src, env);
   if (r.error != null) return (null, r.error);
-  return (rewrite(src, r.filter!.spans, (s) => s.kind == 'tag' ? null : '@${s.id}'), null);
+  return (rewrite(src, r.filter!.spans, (s) => s.kind == 'tag' ? null : (s.kind == 'alias' ? s.id : '@${s.id}')), null);
 }
 
 /// Swaps stored ids back for their current labels.
@@ -870,7 +872,7 @@ String toDisplay(String stored, FilterEnv env) {
   if (r.error != null) return stored;
   final labels = {for (final o in env.channels) o.id: o.label};
   return rewrite(stored, r.filter!.spans, (s) {
-    if (s.kind == 'tag') return null;
+    if (s.kind == 'tag' || s.kind == 'alias') return null;
     final l = labels[s.id];
     return l == null ? null : quoteLabel(l);
   });

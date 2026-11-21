@@ -52,6 +52,8 @@
     {"filter": "#news OR #tech", "ids": ["a", "b", "d", "e", "f"]},
     {"filter": "!#kids", "ids": ["a", "b", "d", "e", "f"]},
     {"filter": "($channel = \"Tech Talk\" OR #news) AND !$played AND $length < 1h", "ids": ["b", "f"]},
+    {"filter": "$podcast = \"Tech Talk\"", "ids": ["a", "d", "f"]},
+    {"filter": "$Podcast != @2 AND !$podcast = \"Kids Corner\"", "ids": ["a", "d", "f"]},
     {"filter": "$title ~ special", "ids": ["e"]},
     {"filter": "$title ^: go", "ids": ["d"]},
     {"filter": "$title $: roundup", "ids": ["f"]},
@@ -101,6 +103,7 @@
   ],
   "stored": [
     {"display": "$channel = \"Tech Talk\" OR !$playlist", "stored": "$channel = @1 OR !$playlist", "shown": "$channel = \"Tech Talk\" OR !$playlist"},
+    {"display": "$podcast = \"Tech Talk\" OR $PODCAST = @2", "stored": "$channel = @1 OR $channel = @2", "shown": "$channel = \"Tech Talk\" OR $channel = \"News Hour\""},
     {"display": "$media = audio #tech", "stored": "$media = audio #tech", "shown": "$media = audio #tech"}
   ]
 }

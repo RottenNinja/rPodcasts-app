@@ -132,6 +132,8 @@ class LocalDb {
     });
   }
 
+  Future<void> saveChannel(Channel c) => db.insert('channels', {'id': c.id, 'json': jsonEncode(c.json)}, conflictAlgorithm: ConflictAlgorithm.replace);
+
   Future<void> savePlay(Play p) => db.insert('plays', {'episode': p.episode, 'json': jsonEncode(p.toJson())}, conflictAlgorithm: ConflictAlgorithm.replace);
 
   Future<void> addPending(PlayChange c) => db.insert('pending', {'json': jsonEncode(c.toJson())});
@@ -155,6 +157,8 @@ class LocalDb {
   }, conflictAlgorithm: ConflictAlgorithm.replace);
 
   Future<void> setPinned(int episode, bool pinned) => db.update('downloads', {'pinned': pinned ? 1 : 0}, where: 'episode = ?', whereArgs: [episode]);
+
+  Future<void> moveDownload(int episode, String path) => db.update('downloads', {'path': path}, where: 'episode = ?', whereArgs: [episode]);
 
   Future<void> deleteDownload(int episode) => db.delete('downloads', where: 'episode = ?', whereArgs: [episode]);
 

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:integration_test/integration_test.dart';
+import 'package:podcasts/app.dart';
 import 'package:podcasts/main.dart' as app;
 import 'package:podcasts/ui/widgets.dart';
 
@@ -65,7 +66,14 @@ void main() {
     for (var i = 0; i < 240 && nav.evaluate().isEmpty; i++) {
       await tester.pump(const Duration(milliseconds: 250));
     }
-    await wait(tester, 80);
+    if (nav.evaluate().isEmpty) throw Exception('not signed in to $server after 60s');
+    // Screens taken before the first sync lands show an empty or half-loaded library.
+    final sync = tester.widget<Scope>(find.byType(Scope)).services.sync;
+    for (var i = 0; i < 480 && (sync.lastSync == null || sync.running); i++) {
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+    if (sync.lastSync == null || sync.running) throw Exception('first sync not done after 120s: ${sync.lastError}');
+    await wait(tester, 40);
     Future<void> tab(String label) async {
       await tester.tap(find.descendant(of: nav, matching: find.text(label)));
       await wait(tester, 30);

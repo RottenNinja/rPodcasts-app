@@ -9,6 +9,9 @@ import '../filter/filter.dart';
 import 'db.dart';
 import 'models.dart';
 
+/// Which of a playlist's episodes count: all of them, those downloaded here, or those still to stream.
+enum OnDevice { any, downloaded, notDownloaded }
+
 class Library extends ChangeNotifier {
   Library(this.db);
   final LocalDb db;
@@ -33,19 +36,28 @@ class Library extends ChangeNotifier {
   /// Called after a play changes locally, so sync can push it soon.
   VoidCallback? onLocalChange;
 
+  /// Reads everything before swapping any of it in, so no frame sees episodes without their filter view.
   Future<void> load() async {
-    channels = {for (final c in await db.channels()) c.id: c};
-    episodes = await db.episodes();
-    plays = {for (final p in await db.plays()) p.episode: p};
+    final channels = {for (final c in await db.channels()) c.id: c};
+    final episodes = await db.episodes();
+    final plays = {for (final p in await db.plays()) p.episode: p};
     for (final (_, c) in await db.pending()) {
       plays.putIfAbsent(c.episode, () => Play(c.episode)).apply(c);
     }
-    playlists = await db.playlists();
-    manual = await db.playlistItems();
-    downloaded = {for (final r in await db.downloads()) r['episode'] as int: r['path'] as String};
-    prefs = Prefs(await db.getJson('prefs') ?? {});
+    final playlists = await db.playlists();
+    final manual = await db.playlistItems();
+    final downloaded = {for (final r in await db.downloads()) r['episode'] as int: r['path'] as String};
+    final prefs = Prefs(await db.getJson('prefs') ?? {});
     // Falls back once to the copy the server used to send.
-    device = DeviceSettings(await db.getJson('device_settings') ?? ((await db.getJson('device'))?['settings'] as Map?)?.cast<String, dynamic>() ?? {});
+    final device = DeviceSettings(await db.getJson('device_settings') ?? ((await db.getJson('device'))?['settings'] as Map?)?.cast<String, dynamic>() ?? {});
+    this.channels = channels;
+    this.episodes = episodes;
+    this.plays = plays;
+    this.playlists = playlists;
+    this.manual = manual;
+    this.downloaded = downloaded;
+    this.prefs = prefs;
+    this.device = device;
     _rebuild();
   }
 
@@ -193,22 +205,36 @@ class Library extends ChangeNotifier {
 
   int notDone(List<Episode> list) => list.where((e) => !play(e.id).played).length;
 
-  Playlist? _playlistOf(String from) {
-    if (!from.startsWith('playlist:')) return null;
-    final id = int.tryParse(from.substring(9));
-    return playlists.where((x) => x.id == id).firstOrNull;
+  /// Whether an episode is one [only] keeps.
+  bool keeps(OnDevice only, Episode e) => switch (only) {
+    OnDevice.any => true,
+    OnDevice.downloaded => downloaded.containsKey(e.id),
+    OnDevice.notDownloaded => !downloaded.containsKey(e.id),
+  };
+
+  /// Where a play started from a playlist came from, which also says which of its episodes follow.
+  static String playlistFrom(int id, OnDevice only) => only == OnDevice.any ? 'playlist:$id' : 'playlist:$id:${only.name}';
+
+  (Playlist, OnDevice)? _playlistOf(String from) {
+    final parts = from.split(':');
+    if (parts.length < 2 || parts.length > 3 || parts[0] != 'playlist') return null;
+    final id = int.tryParse(parts[1]);
+    final p = playlists.where((x) => x.id == id).firstOrNull;
+    if (p == null) return null;
+    return (p, parts.length == 3 ? OnDevice.values.firstWhere((o) => o.name == parts[2], orElse: () => OnDevice.any) : OnDevice.any);
   }
 
   /// Whether the next episode starts by itself: only from a playlist ("playlist:ID") that is set to.
-  bool autoplays(String from) => _playlistOf(from)?.autoplay ?? false;
+  bool autoplays(String from) => _playlistOf(from)?.$1.autoplay ?? false;
 
-  /// The next unplayed episode of the playlist this one was started from; nothing follows outside a playlist.
+  /// The next unplayed episode of the playlist this one was started from, among those it was opened with; nothing follows outside a playlist.
   Episode? nextAfter(String from, int id) {
-    final p = _playlistOf(from);
-    if (p == null) return null;
+    final pick = _playlistOf(from);
+    if (pick == null) return null;
+    final (p, only) = pick;
     var seen = false;
     for (final e in playlistEpisodes(p).$1) {
-      if (seen && e.id != id && !play(e.id).played) return e;
+      if (seen && e.id != id && !play(e.id).played && keeps(only, e)) return e;
       if (e.id == id) seen = true;
     }
     return null;
@@ -249,6 +275,16 @@ class Library extends ChangeNotifier {
     'played',
     true,
   );
+
+  /// Keeps a speed the server has saved for a podcast, so it applies here before the next sync brings it.
+  Future<void> setChannelSpeed(int id, int speed) async {
+    final c = channels[id];
+    if (c == null) return;
+    final updated = Channel({...c.json, 'speed': speed});
+    channels[id] = updated;
+    await db.saveChannel(updated);
+    notifyListeners();
+  }
 
   void setDownloaded(Map<int, String> d) {
     downloaded = d;

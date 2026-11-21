@@ -302,6 +302,8 @@ class Shell extends StatefulWidget {
 class _ShellState extends State<Shell> {
   int tab = 0;
   final keys = List.generate(5, (_) => GlobalKey<NavigatorState>());
+  // Tapping a tab already at its first page clears that page's find box and filters.
+  final resets = List.generate(5, (_) => ValueNotifier(0));
   PlayerController? _player;
   int _asked = 0;
   bool _playerOpen = false;
@@ -319,6 +321,9 @@ class _ShellState extends State<Shell> {
   @override
   void dispose() {
     _player?.removeListener(_onPlayer);
+    for (final r in resets) {
+      r.dispose();
+    }
     super.dispose();
   }
 
@@ -341,9 +346,9 @@ class _ShellState extends State<Shell> {
   Widget build(BuildContext context) {
     final s = Scope.of(context);
     final roots = <Widget>[
-      const PlaylistsScreen(),
-      const PodcastsScreen(),
-      const EpisodesScreen(),
+      PlaylistsScreen(reset: resets[0]),
+      PodcastsScreen(reset: resets[1]),
+      EpisodesScreen(reset: resets[2]),
       const StatusScreen(),
       SettingsScreen(onSignOut: widget.onSignOut),
     ];
@@ -358,14 +363,21 @@ class _ShellState extends State<Shell> {
       ],
     );
     void select(int i) {
-      if (i == tab) keys[i].currentState?.popUntil((r) => r.isFirst);
+      final nav = keys[i].currentState;
+      if (i == tab && nav != null) {
+        if (nav.canPop()) {
+          nav.popUntil((r) => r.isFirst);
+        } else {
+          resets[i].value++;
+        }
+      }
       setState(() => tab = i);
     }
 
     final destinations = [
       (Icons.queue_music_outlined, Icons.queue_music_rounded, 'Playlists'),
       (Icons.grid_view_outlined, Icons.grid_view_rounded, 'Podcasts'),
-      (Icons.search_rounded, Icons.manage_search_rounded, 'Episodes'),
+      (Icons.graphic_eq_outlined, Icons.graphic_eq_rounded, 'Episodes'),
       (Icons.monitor_heart_outlined, Icons.monitor_heart_rounded, 'Status'),
       (Icons.settings_outlined, Icons.settings_rounded, 'Settings'),
     ];

@@ -1,6 +1,8 @@
 package ninja.rotten.rpodcast
 
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.provider.Settings
 import com.ryanheise.audioservice.AudioServiceActivity
@@ -15,9 +17,19 @@ class MainActivity : AudioServiceActivity() {
         super.configureFlutterEngine(flutterEngine)
         // The name shown on the server's Devices page, so sign-in needn't ask for one.
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rpodcasts/device").setMethodCallHandler { call, result ->
-            if (call.method != "name") return@setMethodCallHandler result.notImplemented()
-            val set = if (Build.VERSION.SDK_INT >= 25) Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) else null
-            result.success(if (set.isNullOrBlank()) "${Build.MANUFACTURER} ${Build.MODEL}" else set)
+            when (call.method) {
+                "name" -> {
+                    val set = if (Build.VERSION.SDK_INT >= 25) Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) else null
+                    result.success(if (set.isNullOrBlank()) "${Build.MANUFACTURER} ${Build.MODEL}" else set)
+                }
+                // Whether the phone has a working internet connection, whatever the server is doing.
+                "online" -> {
+                    val cm = getSystemService(ConnectivityManager::class.java)
+                    val caps = cm?.getNetworkCapabilities(cm.activeNetwork)
+                    result.success(caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+                }
+                else -> result.notImplemented()
+            }
         }
         // Saves text through the system "save to" picker, so the user chooses where the file goes.
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rpodcasts/files").setMethodCallHandler { call, result ->

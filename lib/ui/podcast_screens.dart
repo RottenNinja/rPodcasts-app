@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app.dart';
+import '../data/api.dart';
 import '../data/models.dart';
 import 'library_screens.dart';
 import 'parts.dart';
@@ -85,17 +86,37 @@ Future<void> _makeTagPlaylist(BuildContext context, String tag) async {
   );
   final chosen = name.text.trim();
   if (ok != true || chosen.isEmpty || !context.mounted) return;
-  await s.act(context, (api) => api.post('/playlists', {'name': chosen, 'filter': '#$tag', 'sort': 'newest'}), done: 'Playlist created');
+  await s.act(context, (api) => api.post('/playlists', {'name': chosen, 'filter': '#$tag', 'sort': 'newest', 'hide_played': true}), done: 'Playlist created');
 }
 
 class PodcastsScreen extends StatefulWidget {
-  const PodcastsScreen({super.key});
+  const PodcastsScreen({super.key, required this.reset});
+  final Listenable reset;
   @override
   State<PodcastsScreen> createState() => _PodcastsScreenState();
 }
 
 class _PodcastsScreenState extends State<PodcastsScreen> {
   String tag = '';
+  final find = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    widget.reset.addListener(_reset);
+  }
+
+  @override
+  void dispose() {
+    widget.reset.removeListener(_reset);
+    find.dispose();
+    super.dispose();
+  }
+
+  void _reset() => setState(() {
+    find.clear();
+    tag = '';
+  });
 
   Future<void> _opml(String v) async {
     final s = Scope.of(context);
@@ -180,7 +201,8 @@ class _PodcastsScreenState extends State<PodcastsScreen> {
       builder: (context, _) {
         final all = s.lib.channels.values.toList();
         final tags = s.lib.allTags;
-        final shown = all.where((c) => tag.isEmpty || c.tags.contains(tag)).toList()..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+        final q = find.text.trim().toLowerCase();
+        final shown = all.where((c) => (tag.isEmpty || c.tags.contains(tag)) && (q.isEmpty || c.title.toLowerCase().contains(q))).toList()..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
         return Scaffold(
           appBar: rootBar(
             context,
@@ -210,6 +232,30 @@ class _PodcastsScreenState extends State<PodcastsScreen> {
             onRefresh: s.sync.syncNow,
             child: CustomScrollView(
               slivers: [
+                if (all.isNotEmpty)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                      child: TextField(
+                        controller: find,
+                        onChanged: (_) => setState(() {}),
+                        textInputAction: TextInputAction.search,
+                        decoration: InputDecoration(
+                          hintText: 'Find a podcast',
+                          prefixIcon: const Icon(Icons.search_rounded),
+                          suffixIcon: q.isEmpty
+                              ? null
+                              : IconButton(
+                                  icon: const Icon(Icons.close_rounded),
+                                  tooltip: 'Clear',
+                                  onPressed: () => setState(find.clear),
+                                ),
+                          isDense: true,
+                          border: const OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(24))),
+                        ),
+                      ),
+                    ),
+                  ),
                 if (tags.isNotEmpty)
                   SliverToBoxAdapter(
                     child: SizedBox(
@@ -236,10 +282,19 @@ class _PodcastsScreenState extends State<PodcastsScreen> {
                       ),
                     ),
                   ),
-                if (shown.isEmpty)
+                if (shown.isEmpty && q.isNotEmpty)
                   const SliverFillRemaining(
                     hasScrollBody: false,
-                    child: EmptyState(icon: Icons.podcasts_rounded, title: 'Nothing followed here yet', body: 'Add a podcast by its URL with the + button.'),
+                    child: EmptyState(icon: Icons.search_off_rounded, title: 'No podcast matches', body: 'Try fewer letters, or pick All.'),
+                  )
+                else if (shown.isEmpty)
+                  const SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: EmptyState(
+                      icon: Icons.podcasts_rounded,
+                      title: 'Nothing followed here yet',
+                      body: 'Search for a podcast, or add one by its address, with the + button.',
+                    ),
                   ),
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
@@ -328,25 +383,65 @@ class _AddChannelScreenState extends State<AddChannelScreen> {
   final user = TextEditingController();
   final pass = TextEditingController();
   final term = TextEditingController();
+  final name = TextEditingController();
   bool private = false;
-  bool searching = false;
+  bool manual = false;
   bool busy = false;
   String error = '';
+
+  /// The address being read for its preview, so its row can show it.
+  String checking = '';
 
   /// Null until a search has answered.
   List<Map<String, dynamic>>? found;
 
-  /// The search result being tagged and followed.
-  Map<String, dynamic>? picked;
+  /// What the server found at the address; the page shows it with the tags until it is followed or closed.
+  Map<String, dynamic>? preview;
+
+  /// The address and sign-in the preview was read with, which Follow sends again.
+  Map<String, String> asked = {};
+
+  /// Reads an address on the server and shows what it holds; [known] is what a search already said about it.
+  Future<void> _check(Map<String, String> address, {Map<String, dynamic>? known}) async {
+    if (busy || address['url']!.trim().isEmpty) return;
+    final api = Scope.of(context).api;
+    setState(() {
+      busy = true;
+      error = '';
+      checking = address['url']!;
+    });
+    try {
+      Map<String, dynamic> p;
+      try {
+        p = (await api.post('/preview', address) as Map).cast<String, dynamic>();
+      } on ApiError catch (e) {
+        // A server from before previews: show what is known and follow the old way.
+        if (e.status != 404 && e.status != 405) rethrow;
+        p = {'title': address['url'], ...?known, 'url': address['url'], 'unchecked': true};
+      }
+      if (!mounted) return;
+      setState(() {
+        preview = p;
+        asked = address;
+        name.text = p['unchecked'] == true ? '' : '${p['title'] ?? ''}';
+      });
+    } on Object catch (e) {
+      if (mounted) setState(() => error = '$e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          checking = '';
+        });
+      }
+    }
+  }
 
   Future<void> _follow() async {
-    final one = picked;
+    final unchecked = preview?['unchecked'] == true;
     final ok = await Scope.of(context).act(
       context,
-      (api) => api.post(
-        '/channels',
-        one != null ? {'url': one['url'], 'tags': tags.text} : {'url': url.text, 'tags': tags.text, 'username': user.text, 'password': pass.text},
-      ),
+      (api) => api.post(unchecked ? '/channels' : '/follow', {...asked, 'title': name.text.trim(), 'tags': tags.text}),
       done: 'Following. The first read is running.',
     );
     if (ok && mounted) Navigator.pop(context);
@@ -371,133 +466,234 @@ class _AddChannelScreenState extends State<AddChannelScreen> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
+  void _checkManual() => _check({'url': url.text, if (private) 'username': user.text, if (private) 'password': pass.text});
+
+  static const _spinner = SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5));
+
+  List<Widget> _preview(BuildContext context, Map<String, dynamic> p) {
     final s = Scope.of(context);
     final text = Theme.of(context).textTheme;
-    final one = picked;
-    final tagField = TagField(controller: tags, all: s.lib.allTags, helper: 'Pick one or type a new one');
-    final results = found;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Add a podcast')),
-      bottomNavigationBar: searching && one == null ? null : SaveBar(label: 'Follow', onPressed: _follow),
-      body: Readable(
-        builder: (context, inset) => ListView(
-          padding: EdgeInsets.fromLTRB(16 + inset, 8, 16 + inset, 24),
-          children: [
-            SegmentedButton<bool>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: false, icon: Icon(Icons.link_rounded), label: Text('Address')),
-                ButtonSegment(value: true, icon: Icon(Icons.search_rounded), label: Text('Search')),
-              ],
-              selected: {searching},
-              onSelectionChanged: (v) => setState(() => searching = v.first),
-            ),
-            const SizedBox(height: 20),
-            if (!searching) ...[
-              FieldGroup(
-                title: '',
-                children: [
-                  TextField(
-                    controller: url,
-                    autofocus: true,
-                    keyboardType: TextInputType.url,
-                    autocorrect: false,
-                    decoration: const InputDecoration(
-                      labelText: 'Address',
-                      hintText: 'https://…',
-                      helperText: "The podcast's URL",
-                      prefixIcon: Icon(Icons.link_rounded),
-                    ),
-                  ),
-                  tagField,
-                ],
-              ),
-              Section(
-                title: '',
-                children: [
-                  SwitchListTile(
-                    title: const Text('Private feed'),
-                    subtitle: const Text('Needs a user name and password'),
-                    value: private,
-                    onChanged: (v) => setState(() => private = v),
-                  ),
-                ],
-              ),
-              if (private)
-                FieldGroup(
-                  title: 'Sign-in for the feed',
-                  children: [
-                    TextField(
-                      controller: user,
-                      autocorrect: false,
-                      decoration: const InputDecoration(labelText: 'User name'),
-                    ),
-                    TextField(
-                      controller: pass,
-                      obscureText: true,
-                      decoration: const InputDecoration(labelText: 'Password'),
-                    ),
-                  ],
-                ),
-            ] else if (one != null) ...[
-              Section(
-                title: '',
-                children: [
-                  ListTile(
-                    leading: Artwork('${one['artwork']}'),
-                    title: Text('${one['title']}', maxLines: 2, overflow: TextOverflow.ellipsis),
-                    subtitle: Text('${one['author']}', maxLines: 1, overflow: TextOverflow.ellipsis),
-                    trailing: IconButton(tooltip: 'Back to the results', icon: const Icon(Icons.close_rounded), onPressed: () => setState(() => picked = null)),
-                  ),
-                ],
-              ),
-              FieldGroup(title: '', children: [tagField]),
-            ] else ...[
-              TextField(
-                controller: term,
-                autofocus: true,
-                textInputAction: TextInputAction.search,
-                onSubmitted: (_) => _search(),
-                decoration: InputDecoration(
-                  labelText: 'Podcast',
-                  hintText: 'A title or an author',
-                  helperText: "Searches Apple's podcast directory through your server",
-                  prefixIcon: const Icon(Icons.search_rounded),
-                  suffixIcon: busy
-                      ? const Padding(
-                          padding: EdgeInsets.all(14),
-                          child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5)),
-                        )
-                      : IconButton(tooltip: 'Search', icon: const Icon(Icons.arrow_forward_rounded), onPressed: _search),
-                ),
-              ),
-              const SizedBox(height: 20),
-              if (error.isNotEmpty)
-                Notice(icon: Icons.cloud_off_rounded, text: error, error: true)
-              else if (results != null && results.isEmpty)
-                const EmptyState(icon: Icons.search_off_rounded, title: 'Nothing found', body: 'Try fewer words, or add it by its address.')
-              else if (results != null)
-                Section(
-                  title: '',
-                  children: [
-                    for (final f in results)
-                      ListTile(
-                        leading: Artwork('${f['artwork']}'),
-                        title: Text('${f['title']}', maxLines: 2, overflow: TextOverflow.ellipsis),
-                        subtitle: Text(
-                          [if ('${f['author']}'.isNotEmpty) '${f['author']}', if (f['episodes'] != 0) '${f['episodes']} episodes'].join(' · '),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: text.bodySmall,
-                        ),
-                        onTap: () => setState(() => picked = f),
+    final cs = Theme.of(context).colorScheme;
+    final episodes = p['episodes'] is int ? p['episodes'] as int : 0;
+    final media = switch (p['media']) {
+      'audio' => 'Audio',
+      'video' => 'Video',
+      'mixed' => 'Audio and video',
+      _ => '',
+    };
+    final author = '${p['author'] ?? ''}';
+    final description = '${p['description'] ?? ''}'.trim();
+    final following = p['following'] is int && p['following'] != 0;
+    return [
+      Section(
+        title: '',
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Artwork('${p['artwork'] ?? ''}', size: 88),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('${p['title']}', maxLines: 3, overflow: TextOverflow.ellipsis, style: text.titleMedium),
+                      const SizedBox(height: 4),
+                      Text(
+                        [if (author.isNotEmpty) author, if (episodes > 0) '$episodes episodes', if (media.isNotEmpty) media].join(' · '),
+                        style: text.bodySmall?.copyWith(color: cs.onSurfaceVariant),
                       ),
-                  ],
+                      const SizedBox(height: 4),
+                      Text(
+                        '${p['url']}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: text.bodySmall?.copyWith(color: cs.outline),
+                      ),
+                    ],
+                  ),
                 ),
-            ],
+              ],
+            ),
+          ),
+          if (description.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Text(
+                description,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+                style: text.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+              ),
+            ),
+        ],
+      ),
+      if (following)
+        const Notice(icon: Icons.check_circle_outline_rounded, text: 'You already follow this podcast.', error: false)
+      else
+        FieldGroup(
+          title: '',
+          children: [
+            if (p['unchecked'] != true)
+              TextField(
+                controller: name,
+                textCapitalization: TextCapitalization.sentences,
+                maxLength: 200,
+                decoration: const InputDecoration(
+                  labelText: 'Name',
+                  helperText: "Change it if the address's own name doesn't say what this is",
+                  counterText: '',
+                ),
+              ),
+            TagField(controller: tags, all: s.lib.allTags, helper: 'Pick one or type a new one'),
           ],
+        ),
+    ];
+  }
+
+  List<Widget> _manual() => [
+    FieldGroup(
+      title: '',
+      children: [
+        TextField(
+          controller: url,
+          autofocus: true,
+          keyboardType: TextInputType.url,
+          autocorrect: false,
+          textInputAction: TextInputAction.next,
+          onSubmitted: (_) => _checkManual(),
+          decoration: const InputDecoration(
+            labelText: 'Address',
+            hintText: 'https://…',
+            helperText: "A feed, a podcast's website or a page of videos",
+            helperMaxLines: 2,
+            prefixIcon: Icon(Icons.link_rounded),
+          ),
+        ),
+      ],
+    ),
+    Section(
+      title: '',
+      children: [
+        SwitchListTile(
+          title: const Text('Private feed'),
+          subtitle: const Text('Needs a user name and password'),
+          value: private,
+          onChanged: (v) => setState(() => private = v),
+        ),
+      ],
+    ),
+    if (private)
+      FieldGroup(
+        title: 'Sign-in for the feed',
+        children: [
+          TextField(
+            controller: user,
+            autocorrect: false,
+            decoration: const InputDecoration(labelText: 'User name'),
+          ),
+          TextField(
+            controller: pass,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: 'Password'),
+          ),
+        ],
+      ),
+    if (error.isNotEmpty) Notice(icon: Icons.error_outline_rounded, text: error, error: true),
+  ];
+
+  List<Widget> _searchTab(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final results = found;
+    return [
+      TextField(
+        controller: term,
+        autofocus: true,
+        textInputAction: TextInputAction.search,
+        onSubmitted: (_) => _search(),
+        decoration: InputDecoration(
+          labelText: 'Podcast',
+          hintText: 'A title or an author',
+          helperText: "Searches Apple's podcast directory through your server",
+          prefixIcon: const Icon(Icons.search_rounded),
+          suffixIcon: busy && checking.isEmpty
+              ? const Padding(padding: EdgeInsets.all(14), child: _spinner)
+              : IconButton(tooltip: 'Search', icon: const Icon(Icons.arrow_forward_rounded), onPressed: _search),
+        ),
+      ),
+      const SizedBox(height: 20),
+      if (error.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: Notice(icon: Icons.error_outline_rounded, text: error, error: true),
+        ),
+      if (results != null && results.isEmpty)
+        const EmptyState(icon: Icons.search_off_rounded, title: 'Nothing found', body: 'Try fewer words, or add it by its address under Manual.')
+      else if (results != null)
+        Section(
+          title: '',
+          children: [
+            for (final f in results)
+              ListTile(
+                leading: Artwork('${f['artwork']}'),
+                title: Text('${f['title']}', maxLines: 2, overflow: TextOverflow.ellipsis),
+                subtitle: Text(
+                  [if ('${f['author']}'.isNotEmpty) '${f['author']}', if (f['episodes'] != 0) '${f['episodes']} episodes'].join(' · '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: text.bodySmall,
+                ),
+                trailing: checking == f['url'] ? _spinner : const Icon(Icons.chevron_right_rounded),
+                enabled: !busy || checking == f['url'],
+                onTap: () => _check({'url': '${f['url']}'}, known: f),
+              ),
+          ],
+        ),
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = preview;
+    final following = p != null && p['following'] is int && p['following'] != 0;
+    return PopScope(
+      canPop: p == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) setState(() => preview = null);
+      },
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Add a podcast')),
+        bottomNavigationBar: p != null
+            ? (following ? null : SaveBar(label: 'Follow', onPressed: _follow))
+            : (manual ? SaveBar(label: busy ? 'Reading the address…' : 'Next', onPressed: busy ? null : _checkManual) : null),
+        body: Readable(
+          builder: (context, inset) => ListView(
+            padding: EdgeInsets.fromLTRB(16 + inset, 8, 16 + inset, 24),
+            children: [
+              if (p != null)
+                ..._preview(context, p)
+              else ...[
+                SegmentedButton<bool>(
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(value: false, icon: Icon(Icons.search_rounded), label: Text('Search')),
+                    ButtonSegment(value: true, icon: Icon(Icons.link_rounded), label: Text('Manual')),
+                  ],
+                  selected: {manual},
+                  onSelectionChanged: busy
+                      ? null
+                      : (v) => setState(() {
+                          manual = v.first;
+                          error = '';
+                        }),
+                ),
+                const SizedBox(height: 20),
+                if (manual) ..._manual() else ..._searchTab(context),
+              ],
+            ],
+          ),
         ),
       ),
     );
@@ -754,7 +950,7 @@ class _ChannelSettingsScreenState extends State<ChannelSettingsScreen> {
                 NumberRow(label: 'Speed', controller: speed, unit: '%', hint: '100', enabled: true),
                 NumberRow(label: 'Skip the first', controller: skipStart, unit: 's', hint: '0', enabled: true),
                 NumberRow(label: 'Skip the last', controller: skipEnd, unit: 's', hint: '0', enabled: true),
-                if (c.kind == 'video')
+                if (c.kind == 'video' || s.lib.episodes.any((e) => e.channelId == c.id && e.media == 'video'))
                   ChoiceRow<String>(
                     label: 'Quality',
                     value: quality,

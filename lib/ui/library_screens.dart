@@ -6,16 +6,47 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../app.dart';
+import '../data/library.dart';
 import '../data/models.dart';
+import '../data/sync.dart';
 import '../filter/filter.dart';
 import 'parts.dart';
 import 'podcast_screens.dart';
 import 'widgets.dart';
 
-class PlaylistsScreen extends StatelessWidget {
-  const PlaylistsScreen({super.key});
+/// Which playlists the first page shows: every one, those kept offline, or those with unplayed episodes downloaded or still to stream.
+enum _Shelf { all, kept, downloaded, streaming }
 
-  void _menu(BuildContext context, Playlist p, Episode? start) {
+class PlaylistsScreen extends StatefulWidget {
+  const PlaylistsScreen({super.key, required this.reset});
+  final Listenable reset;
+  @override
+  State<PlaylistsScreen> createState() => _PlaylistsScreenState();
+}
+
+class _PlaylistsScreenState extends State<PlaylistsScreen> {
+  final find = TextEditingController();
+  _Shelf shelf = _Shelf.all;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.reset.addListener(_reset);
+  }
+
+  @override
+  void dispose() {
+    widget.reset.removeListener(_reset);
+    find.dispose();
+    super.dispose();
+  }
+
+  void _reset() => setState(() {
+    find.clear();
+    shelf = _Shelf.all;
+  });
+
+  void _menu(BuildContext context, Playlist p, Episode? start, OnDevice only) {
     final s = Scope.of(context);
     final list = s.lib.playlists;
     final i = list.indexWhere((x) => x.id == p.id);
@@ -31,7 +62,7 @@ class PlaylistsScreen extends StatelessWidget {
           SheetAction(
             icon: Icons.play_arrow_rounded,
             label: 'Play',
-            run: () => s.player.start(start, from: 'playlist:${p.id}', reveal: true),
+            run: () => s.player.start(start, from: Library.playlistFrom(p.id, only), reveal: true),
           ),
         SheetAction(
           icon: Icons.edit_outlined,
@@ -40,7 +71,7 @@ class PlaylistsScreen extends StatelessWidget {
         ),
         SheetAction(
           icon: Icons.download_for_offline_outlined,
-          label: 'On this device',
+          label: 'Keep offline',
           run: () => showModalBottomSheet<void>(context: context, isScrollControlled: true, builder: (_) => _PlaylistDeviceSheet(p)),
         ),
         if (i > 0) SheetAction(icon: Icons.arrow_upward_rounded, label: 'Move earlier', run: () => move(i - 1)),
@@ -66,9 +97,26 @@ class PlaylistsScreen extends StatelessWidget {
         ],
       ),
       body: ListenableBuilder(
-        listenable: s.lib,
+        listenable: Listenable.merge([s.lib, s.sync]),
         builder: (context, _) {
           final lib = s.lib;
+          if (lib.channels.isEmpty && lib.playlists.isEmpty) return _GettingStarted(sync: s.sync);
+          final q = find.text.trim().toLowerCase();
+          bool kept(Playlist p) => lib.device.forPlaylist(p.id).download;
+          final only = switch (shelf) {
+            _Shelf.downloaded => OnDevice.downloaded,
+            _Shelf.streaming => OnDevice.notDownloaded,
+            _ => OnDevice.any,
+          };
+          int waiting(Playlist p, OnDevice o) => lib.playlistEpisodes(p).$1.where((e) => !lib.play(e.id).played && lib.keeps(o, e)).length;
+          final shown = lib.playlists.where((p) {
+            if (q.isNotEmpty && !p.name.toLowerCase().contains(q)) return false;
+            return switch (shelf) {
+              _Shelf.all => true,
+              _Shelf.kept => kept(p),
+              _Shelf.downloaded || _Shelf.streaming => waiting(p, only) > 0,
+            };
+          }).toList();
           return RefreshIndicator(
             onRefresh: s.sync.syncNow,
             child: Readable(
@@ -78,6 +126,65 @@ class PlaylistsScreen extends StatelessWidget {
                     padding: EdgeInsets.fromLTRB(16 + inset, 4, 16 + inset, 0),
                     sliver: SliverList.list(
                       children: [
+                        if (lib.playlists.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: TextField(
+                              controller: find,
+                              onChanged: (_) => setState(() {}),
+                              textInputAction: TextInputAction.search,
+                              decoration: InputDecoration(
+                                hintText: 'Find a playlist',
+                                prefixIcon: const Icon(Icons.search_rounded),
+                                suffixIcon: q.isEmpty
+                                    ? null
+                                    : IconButton(icon: const Icon(Icons.close_rounded), tooltip: 'Clear', onPressed: () => setState(find.clear)),
+                                isDense: true,
+                                border: const OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(24))),
+                              ),
+                            ),
+                          ),
+                        if (lib.playlists.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: SizedBox(
+                              height: 48,
+                              child: ListView(
+                                scrollDirection: Axis.horizontal,
+                                children: [
+                                  for (final (l, v) in const [('All', _Shelf.all), ('Offline playlists', _Shelf.kept), ('Downloaded episodes', _Shelf.downloaded), ('Streaming episodes', _Shelf.streaming)])
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 8),
+                                      child: ChoiceChip(label: Text(l), selected: shelf == v, onSelected: (_) => setState(() => shelf = v)),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        if (shown.isEmpty && q.isNotEmpty)
+                          EmptyState(
+                            icon: Icons.search_off_rounded,
+                            title: 'No playlist matches',
+                            body: shelf != _Shelf.all ? 'Try fewer letters, or pick All.' : 'Try fewer letters.',
+                          )
+                        else if (shown.isEmpty && shelf == _Shelf.kept)
+                          const EmptyState(
+                            icon: Icons.download_for_offline_outlined,
+                            title: 'No offline playlists',
+                            body: 'Long-press a playlist and pick Keep offline to download it for offline listening.',
+                          )
+                        else if (shown.isEmpty && shelf == _Shelf.downloaded)
+                          const EmptyState(
+                            icon: Icons.download_done_rounded,
+                            title: 'No downloaded episodes yet',
+                            body: 'Playlists with unplayed episodes on this device show here, whichever playlist downloaded them.',
+                          )
+                        else if (shown.isEmpty && shelf == _Shelf.streaming)
+                          const EmptyState(
+                            icon: Icons.wifi_tethering_rounded,
+                            title: 'Nothing left to stream',
+                            body: 'Every unplayed episode is already downloaded.',
+                          ),
                         if (lib.channels.isEmpty)
                           Padding(
                             padding: const EdgeInsets.only(bottom: 12),
@@ -87,7 +194,7 @@ class PlaylistsScreen extends StatelessWidget {
                                 contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                                 leading: Icon(Icons.podcasts_rounded, color: cs.onPrimaryContainer),
                                 title: const Text('Nothing followed yet'),
-                                subtitle: const Text('Add a podcast by its URL.'),
+                                subtitle: const Text('Search for a podcast, or add one by its address.'),
                                 trailing: const Icon(Icons.chevron_right_rounded),
                                 onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AddChannelScreen())),
                               ),
@@ -111,9 +218,10 @@ class PlaylistsScreen extends StatelessWidget {
                             crossAxisSpacing: gap,
                             mainAxisExtent: _PlaylistPoster.height(width, text),
                           ),
-                          delegate: SliverChildBuilderDelegate(childCount: lib.playlists.length, (context, i) {
-                            final p = lib.playlists[i];
-                            final (eps, err) = lib.playlistEpisodes(p);
+                          delegate: SliverChildBuilderDelegate(childCount: shown.length, (context, i) {
+                            final p = shown[i];
+                            final (whole, err) = lib.playlistEpisodes(p);
+                            final eps = whole.where((e) => lib.keeps(only, e)).toList();
                             final open = eps.where((e) => !lib.play(e.id).played).toList();
                             final start = lib.startOf(eps);
                             // The poster shows whose episodes are waiting, or failing that, whose are in it at all.
@@ -127,8 +235,9 @@ class PlaylistsScreen extends StatelessWidget {
                               covers: covers.toList(),
                               toPlay: open.length,
                               problem: err != null,
-                              onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => PlaylistScreen(p.id))),
-                              onMenu: () => _menu(context, p, start),
+                              dimmed: s.sync.offline && !whole.any((e) => !lib.play(e.id).played && (lib.downloaded.containsKey(e.id) || (!s.sync.noNetwork && !e.streamed))),
+                              onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => PlaylistScreen(p.id, only: only))),
+                              onMenu: () => _menu(context, p, start, only),
                             );
                           }),
                         );
@@ -145,13 +254,111 @@ class PlaylistsScreen extends StatelessWidget {
   }
 }
 
+/// The first page before anything is followed: what to do first, and what the playlists will be.
+class _GettingStarted extends StatelessWidget {
+  const _GettingStarted({required this.sync});
+  final SyncService sync;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    // An empty local copy says nothing until the server has answered once.
+    if (sync.lastSync == null) {
+      if (sync.lastError.isEmpty) return const Center(child: CircularProgressIndicator());
+      return RefreshIndicator(
+        onRefresh: sync.syncNow,
+        child: CustomScrollView(
+          slivers: [
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: EmptyState(icon: Icons.cloud_off_rounded, title: "Can't reach the server", body: '${sync.lastError}\nPull down to try again.'),
+            ),
+          ],
+        ),
+      );
+    }
+    Widget step(int n, String title, String body, {Widget? action}) => Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          CircleAvatar(
+            radius: 16,
+            backgroundColor: cs.primaryContainer,
+            foregroundColor: cs.onPrimaryContainer,
+            child: Text('$n', style: text.titleSmall?.copyWith(color: cs.onPrimaryContainer)),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 5, bottom: 4),
+                  child: Text(title, style: text.titleMedium),
+                ),
+                Text(body, style: text.bodyMedium?.copyWith(color: cs.onSurfaceVariant)),
+                if (action != null) Padding(padding: const EdgeInsets.only(top: 12), child: action),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    return RefreshIndicator(
+      onRefresh: sync.syncNow,
+      child: Readable(
+        builder: (context, inset) => ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: EdgeInsets.fromLTRB(20 + inset, 12, 20 + inset, 24),
+          children: [
+            Text('Start by following a podcast', style: text.titleLarge),
+            const SizedBox(height: 6),
+            Text('Playlists are made from the podcasts you follow, so this page fills up once you follow one.', style: text.bodyLarge?.copyWith(color: cs.onSurfaceVariant)),
+            const SizedBox(height: 28),
+            step(
+              1,
+              'Follow a podcast',
+              'Search for it by title or author, or paste the address of a feed or of a page of videos.',
+              action: FilledButton.icon(
+                icon: const Icon(Icons.add_rounded),
+                label: const Text('Add a podcast'),
+                onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AddChannelScreen())),
+              ),
+            ),
+            step(
+              2,
+              'Your playlists appear here',
+              'The first follow makes All, New, In progress, All audio, All video and Starred. A playlist is a saved filter over everything you follow, so new episodes turn up in it by themselves.',
+            ),
+            step(3, 'Make them your own', 'Give podcasts tags such as #news, turn a tag into a playlist on the Podcasts tab, and choose which playlists this device downloads for offline listening.'),
+            Notice(icon: Icons.swap_horiz_rounded, text: 'Coming from another app? Import its OPML file from the menu on the Podcasts tab.', error: false),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// A playlist on the first page: one card with its name, the covers of the podcasts in it and how much is waiting.
 class _PlaylistPoster extends StatelessWidget {
-  const _PlaylistPoster({required this.playlist, required this.covers, required this.toPlay, required this.problem, required this.onTap, required this.onMenu});
+  const _PlaylistPoster({
+    required this.playlist,
+    required this.covers,
+    required this.toPlay,
+    required this.problem,
+    required this.dimmed,
+    required this.onTap,
+    required this.onMenu,
+  });
   final Playlist playlist;
   final List<String> covers;
   final int toPlay;
   final bool problem;
+
+  /// Nothing waiting here can play right now: none is downloaded, and the rest need the server or the internet.
+  final bool dimmed;
   final VoidCallback onTap;
   final VoidCallback onMenu;
 
@@ -171,6 +378,7 @@ class _PlaylistPoster extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
+    final note = problem ? 'Filter needs fixing' : (toPlay == 0 ? 'All caught up' : '$toPlay to play');
     return Material(
       color: cs.surfaceContainer,
       borderRadius: BorderRadius.circular(20),
@@ -179,65 +387,69 @@ class _PlaylistPoster extends StatelessWidget {
         onTap: onTap,
         onLongPress: onMenu,
         onSecondaryTap: onMenu,
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Column(
-            children: [
-              Text(playlist.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: text.titleSmall),
-              const SizedBox(height: gap),
-              AspectRatio(
-                aspectRatio: 1 / fan,
-                child: LayoutBuilder(
-                  builder: (context, box) {
-                    final w = box.maxWidth;
-                    final n = covers.length;
-                    if (n == 0) return Icon(Icons.queue_music_rounded, size: w * 0.36, color: cs.onSurfaceVariant.withValues(alpha: 0.5));
-                    // Each cover behind the first is smaller, further right, more tilted and more washed out.
-                    final sizes = [for (var i = 0; i < n; i++) w * (n == 1 ? 0.5 : 0.42) * math.pow(0.93, i)];
-                    final centres = [sizes.first / 2];
-                    for (var i = 1; i < n; i++) {
-                      centres.add(centres.last + w * 0.145 * math.pow(0.95, i));
-                    }
-                    final shift = (w - (centres.last + sizes.last / 2)) / 2;
-                    return Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        for (var i = n - 1; i >= 0; i--)
-                          Positioned(
-                            left: shift + centres[i] - sizes[i] / 2,
-                            top: (box.maxHeight - sizes[i]) / 2,
-                            child: Transform.rotate(
-                              angle: i * 0.045,
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular((sizes[i] * 0.16).clamp(6, 22)),
-                                  boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(-1, 1))],
+        child: AnimatedOpacity(
+          opacity: dimmed ? 0.45 : 1,
+          duration: const Duration(milliseconds: 200),
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              children: [
+                Text(playlist.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: text.titleSmall),
+                const SizedBox(height: gap),
+                AspectRatio(
+                  aspectRatio: 1 / fan,
+                  child: LayoutBuilder(
+                    builder: (context, box) {
+                      final w = box.maxWidth;
+                      final n = covers.length;
+                      if (n == 0) return Icon(Icons.queue_music_rounded, size: w * 0.36, color: cs.onSurfaceVariant.withValues(alpha: 0.5));
+                      // Each cover behind the first is smaller, further right, more tilted and more washed out.
+                      final sizes = [for (var i = 0; i < n; i++) w * (n == 1 ? 0.5 : 0.42) * math.pow(0.93, i)];
+                      final centres = [sizes.first / 2];
+                      for (var i = 1; i < n; i++) {
+                        centres.add(centres.last + w * 0.145 * math.pow(0.95, i));
+                      }
+                      final shift = (w - (centres.last + sizes.last / 2)) / 2;
+                      return Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          for (var i = n - 1; i >= 0; i--)
+                            Positioned(
+                              left: shift + centres[i] - sizes[i] / 2,
+                              top: (box.maxHeight - sizes[i]) / 2,
+                              child: Transform.rotate(
+                                angle: i * 0.045,
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular((sizes[i] * 0.16).clamp(6, 22)),
+                                    boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(-1, 1))],
+                                  ),
+                                  foregroundDecoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular((sizes[i] * 0.16).clamp(6, 22)),
+                                    border: Border.all(color: cs.outline.withValues(alpha: 0.55), width: 1.5),
+                                    color: cs.surfaceContainer.withValues(alpha: i * 0.11),
+                                  ),
+                                  child: Artwork(covers[i], size: sizes[i]),
                                 ),
-                                foregroundDecoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular((sizes[i] * 0.16).clamp(6, 22)),
-                                  border: Border.all(color: cs.outline.withValues(alpha: 0.55), width: 1.5),
-                                  color: cs.surfaceContainer.withValues(alpha: i * 0.11),
-                                ),
-                                child: Artwork(covers[i], size: sizes[i]),
                               ),
                             ),
-                          ),
-                      ],
-                    );
-                  },
+                        ],
+                      );
+                    },
+                  ),
                 ),
-              ),
-              const SizedBox(height: gap),
-              Text(
-                problem ? 'Filter needs fixing' : (toPlay == 0 ? 'All caught up' : '$toPlay to play'),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: text.bodySmall?.copyWith(
-                  color: problem ? cs.error : (toPlay == 0 ? null : cs.primary),
-                  fontWeight: toPlay == 0 ? null : FontWeight.w600,
+                const SizedBox(height: gap),
+                Text(
+                  note,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: text.bodySmall?.copyWith(
+                    color: problem ? cs.error : (toPlay == 0 ? null : cs.primary),
+                    fontWeight: toPlay == 0 ? null : FontWeight.w600,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -246,13 +458,19 @@ class _PlaylistPoster extends StatelessWidget {
 }
 
 class PlaylistScreen extends StatefulWidget {
-  const PlaylistScreen(this.id, {super.key});
+  const PlaylistScreen(this.id, {super.key, required this.only});
   final int id;
+
+  /// Which episodes the page opens with, from the chip picked on Playlists.
+  final OnDevice only;
   @override
   State<PlaylistScreen> createState() => _PlaylistScreenState();
 }
 
 class _PlaylistScreenState extends State<PlaylistScreen> with EpisodePicker {
+  bool showPlayed = false;
+  late OnDevice only = widget.only;
+
   @override
   Widget build(BuildContext context) {
     final s = Scope.of(context);
@@ -268,10 +486,15 @@ class _PlaylistScreenState extends State<PlaylistScreen> with EpisodePicker {
             body: const EmptyState(icon: Icons.playlist_remove_rounded, title: 'This playlist was deleted', body: 'It was removed on another device.'),
           );
         }
-        final (eps, err) = s.lib.playlistEpisodes(p);
-        final start = s.lib.startOf(eps);
-        final from = 'playlist:${p.id}';
+        final (whole, err) = s.lib.playlistEpisodes(p);
+        final all = whole.where((e) => s.lib.keeps(only, e)).toList();
+        final start = s.lib.startOf(all);
+        final toPlay = s.lib.notDone(all);
+        // A playlist that hides played episodes still holds them; only the list leaves them out.
+        final eps = p.hidePlayed && !showPlayed ? all.where((e) => !s.lib.play(e.id).played).toList() : all;
+        final from = Library.playlistFrom(p.id, only);
         final offline = s.lib.device.forPlaylist(p.id).download;
+        final held = whole.where((e) => !s.lib.play(e.id).played && s.lib.downloaded.containsKey(e.id)).length;
         final page = Scaffold(
           appBar: picking
               ? pickingBar(eps.map((e) => e.id))
@@ -289,7 +512,7 @@ class _PlaylistScreenState extends State<PlaylistScreen> with EpisodePicker {
                       ),
                     IconButton(
                       icon: Icon(offline ? Icons.download_for_offline_rounded : Icons.download_for_offline_outlined, color: offline ? cs.primary : null),
-                      tooltip: 'On this device',
+                      tooltip: 'Keep offline',
                       onPressed: () => showModalBottomSheet<void>(context: context, isScrollControlled: true, builder: (_) => _PlaylistDeviceSheet(p)),
                     ),
                     IconButton(
@@ -336,7 +559,7 @@ class _PlaylistScreenState extends State<PlaylistScreen> with EpisodePicker {
                             children: [
                               Text(p.name, style: text.headlineSmall, maxLines: 2, overflow: TextOverflow.ellipsis),
                               const SizedBox(height: 2),
-                              Text('${s.lib.notDone(eps)} to play · ${eps.length} episodes${offline ? ' · kept offline' : ''}', style: text.bodySmall),
+                              Text('$toPlay to play · ${all.length} episodes${offline ? ' · kept offline' : ''}${held > 0 ? ' · $held downloaded' : ''}', style: text.bodySmall),
                             ],
                           ),
                         ),
@@ -349,6 +572,19 @@ class _PlaylistScreenState extends State<PlaylistScreen> with EpisodePicker {
                       ],
                     ),
                   ),
+                  if (only != OnDevice.any)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: InputChip(
+                          avatar: Icon(only == OnDevice.downloaded ? Icons.download_done_rounded : Icons.wifi_tethering_rounded, size: 18),
+                          label: Text(only == OnDevice.downloaded ? 'Downloaded episodes' : 'Streaming episodes'),
+                          tooltip: 'Show every episode',
+                          onDeleted: () => setState(() => only = OnDevice.any),
+                        ),
+                      ),
+                    ),
                   if (err != null)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -356,18 +592,32 @@ class _PlaylistScreenState extends State<PlaylistScreen> with EpisodePicker {
                     ),
                 ],
               );
+              final played = all.length - toPlay;
+              final foot = !p.hidePlayed || played == 0
+                  ? const SizedBox.shrink()
+                  : Center(
+                      child: TextButton(
+                        onPressed: () => setState(() => showPlayed = !showPlayed),
+                        child: Text(showPlayed ? 'Hide played' : 'Show $played played'),
+                      ),
+                    );
               final pad = EdgeInsets.fromLTRB(inset, 0, inset, 24);
               // A long-press drags in a hand-ordered playlist, so there picking starts from the menu.
               if (p.sort != 'manual' || picking) {
                 return ListView.builder(
                   padding: pad,
-                  itemCount: eps.length + 1,
-                  itemBuilder: (_, i) => i == 0 ? head : pickTile(eps[i - 1], from: from, channelArt: true),
+                  itemCount: eps.length + 2,
+                  itemBuilder: (_, i) => i == 0
+                      ? head
+                      : i > eps.length
+                      ? foot
+                      : pickTile(eps[i - 1], from: from, channelArt: true),
                 );
               }
               return ReorderableListView.builder(
                 padding: pad,
                 header: head,
+                footer: foot,
                 buildDefaultDragHandles: false,
                 onReorderItem: (a, b) {
                   if (a == b) return;
@@ -451,7 +701,7 @@ mixin EpisodePicker<T extends StatefulWidget> on State<T> {
       title: Text(some ? '${selected.length} selected' : 'Select episodes'),
       actions: [
         IconButton(icon: const Icon(Icons.check_circle_outline_rounded), tooltip: 'Mark played', onPressed: some ? () => _apply('played') : null),
-        IconButton(icon: const Icon(Icons.restart_alt_rounded), tooltip: 'Reset progress (mark unplayed)', onPressed: some ? () => _apply('unplayed') : null),
+        IconButton(icon: const Icon(Icons.remove_done_rounded), tooltip: 'Reset progress (mark unplayed)', onPressed: some ? () => _apply('unplayed') : null),
         IconButton(icon: const Icon(Icons.star_outline_rounded), tooltip: 'Star', onPressed: some ? () => _apply('star') : null),
         PopupMenuButton<String>(
           onSelected: (v) => v == 'all' ? setState(() => selected.addAll(all)) : _apply(v),
@@ -494,7 +744,7 @@ class _PlaylistDeviceSheetState extends State<_PlaylistDeviceSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('On this device', style: text.titleLarge),
+            Text('Keep offline', style: text.titleLarge),
             const SizedBox(height: 4),
             Text('How ${widget.playlist.name} plays here. Other devices keep their own choice.', style: text.bodySmall),
             const SizedBox(height: 16),
@@ -551,8 +801,8 @@ class _PlaylistDeviceSheetState extends State<_PlaylistDeviceSheet> {
                 child: Notice(
                   icon: Icons.block_rounded,
                   text: s.lib.usesDownloaded(widget.playlist.filter)
-                      ? "This playlist can't be kept on this device: its filter uses \$downloaded, so downloading would change what it holds and it would never settle. Take \$downloaded out of the filter to download it."
-                      : "This playlist can't be kept on this device: $why.",
+                      ? "This playlist can't be kept offline: its filter uses \$downloaded, so downloading would change what it holds and it would never settle. Take \$downloaded out of the filter to download it."
+                      : "This playlist can't be kept offline: $why.",
                   error: false,
                 ),
               ),
@@ -603,6 +853,7 @@ class _PlaylistEditScreenState extends State<PlaylistEditScreen> {
   final filter = TextEditingController();
   late String sort = widget.playlist?.sort ?? 'newest';
   late bool autoplay = widget.playlist?.autoplay ?? false;
+  late bool hidePlayed = widget.playlist?.hidePlayed ?? true;
   bool init = false;
 
   @override
@@ -616,7 +867,7 @@ class _PlaylistEditScreenState extends State<PlaylistEditScreen> {
   Future<void> _save() async {
     final s = Scope.of(context);
     final p = widget.playlist;
-    final body = {'name': name.text, 'filter': filter.text, 'sort': sort, 'autoplay': autoplay};
+    final body = {'name': name.text, 'filter': filter.text, 'sort': sort, 'autoplay': autoplay, 'hide_played': hidePlayed};
     final ok = await s.act(context, (api) => api.post(p == null ? '/playlists' : '/playlists/${p.id}', body));
     if (ok && mounted) Navigator.pop(context);
   }
@@ -656,7 +907,15 @@ class _PlaylistEditScreenState extends State<PlaylistEditScreen> {
             ),
             Section(
               title: 'Order',
-              children: [ChoiceRow<String>(label: 'Show', value: sort, options: sorts, onChanged: (v) => setState(() => sort = v))],
+              children: [
+                ChoiceRow<String>(label: 'Show', value: sort, options: sorts, onChanged: (v) => setState(() => sort = v)),
+                SwitchListTile(
+                  title: const Text('Hide played episodes'),
+                  subtitle: const Text(r"They stay in the playlist, so !$playlist doesn't pick them up"),
+                  value: hidePlayed,
+                  onChanged: (v) => setState(() => hidePlayed = v),
+                ),
+              ],
             ),
             Section(
               title: 'Playback',
@@ -679,7 +938,8 @@ class _PlaylistEditScreenState extends State<PlaylistEditScreen> {
 String toDisplayFilter(Services s, String stored) => toDisplay(stored, s.lib.env);
 
 class EpisodesScreen extends StatefulWidget {
-  const EpisodesScreen({super.key});
+  const EpisodesScreen({super.key, required this.reset});
+  final Listenable reset;
   @override
   State<EpisodesScreen> createState() => _EpisodesScreenState();
 }
@@ -688,6 +948,24 @@ class _EpisodesScreenState extends State<EpisodesScreen> with EpisodePicker {
   final filter = TextEditingController();
   String sort = 'newest';
   int shown = 100;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.reset.addListener(_reset);
+  }
+
+  @override
+  void dispose() {
+    widget.reset.removeListener(_reset);
+    filter.dispose();
+    super.dispose();
+  }
+
+  void _reset() => setState(() {
+    filter.clear();
+    shown = 100;
+  });
 
   @override
   Widget build(BuildContext context) {

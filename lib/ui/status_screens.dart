@@ -7,6 +7,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../app.dart';
+import '../data/api.dart';
 import '../data/models.dart';
 import 'parts.dart';
 import 'theme.dart';
@@ -26,6 +27,7 @@ class _StatusScreenState extends State<StatusScreen> {
   bool onServer = false;
   List<Map<String, Object?>> events = [];
   final Set<String> expanded = {};
+  bool _asking = false;
 
   @override
   void didChangeDependencies() {
@@ -42,25 +44,34 @@ class _StatusScreenState extends State<StatusScreen> {
     super.dispose();
   }
 
+  // An offline request can take seconds to fail, so polls never pile up.
   Future<void> _load() async {
+    if (_asking) return;
+    _asking = true;
     final s = Scope.of(context);
-    final ev = await s.db.events();
     try {
-      final st = (await s.api.get('/status') as Map).cast<String, dynamic>();
-      if (mounted) {
-        setState(() {
-          server = st;
-          error = '';
-          events = ev;
-        });
+      final ev = await s.db.events();
+      try {
+        final st = (await s.api.get('/status') as Map).cast<String, dynamic>();
+        if (mounted) {
+          setState(() {
+            server = st;
+            error = '';
+            events = ev;
+          });
+        }
+      } on Unreachable {
+        if (mounted) setState(() => events = ev);
+      } on Object catch (e) {
+        if (mounted) {
+          setState(() {
+            error = '$e';
+            events = ev;
+          });
+        }
       }
-    } on Object catch (e) {
-      if (mounted) {
-        setState(() {
-          error = 'Server not reachable: $e';
-          events = ev;
-        });
-      }
+    } finally {
+      _asking = false;
     }
   }
 
@@ -189,13 +200,17 @@ class _StatusScreenState extends State<StatusScreen> {
               ),
               const SizedBox(height: 20),
               if (!onServer) ..._device(s),
-              if (onServer && error.isNotEmpty)
+              if (onServer && (s.sync.offline || error.isNotEmpty))
                 Padding(
                   padding: const EdgeInsets.only(bottom: 20),
-                  child: Notice(icon: Icons.cloud_off_rounded, text: error, error: true),
+                  child: Notice(
+                    icon: Icons.cloud_off_rounded,
+                    text: s.sync.offline ? "Can't reach the server${st == null ? '' : ', so this is how it was when it last answered'}." : error,
+                    error: true,
+                  ),
                 ),
               if (onServer && st != null) ..._server(st, s),
-              if (onServer && st == null && error.isEmpty)
+              if (onServer && st == null && error.isEmpty && !s.sync.offline)
                 const Padding(
                   padding: EdgeInsets.all(32),
                   child: Center(child: CircularProgressIndicator()),
@@ -220,11 +235,21 @@ class _StatusScreenState extends State<StatusScreen> {
             leading: s.sync.running
                 ? _spinner
                 : Icon(s.sync.lastError.isEmpty ? Icons.cloud_done_outlined : Icons.cloud_off_rounded, color: s.sync.lastError.isEmpty ? cs.primary : cs.error),
-            title: s.sync.running ? 'Syncing…' : 'Synced ${ago(s.sync.lastSync)}',
+            title: s.sync.running && s.sync.offline
+                ? '${s.sync.noNetwork ? 'Offline' : 'Server unreachable'} · trying to reach the server…'
+                : s.sync.running
+                ? 'Syncing…'
+                : s.sync.offline
+                ? '${s.sync.noNetwork ? 'Offline' : 'Server unreachable'} · synced ${ago(s.sync.lastSync)}'
+                : 'Synced ${ago(s.sync.lastSync)}',
             detail: s.sync.pending == 0 ? 'Everything is sent' : '${s.sync.pending} change${s.sync.pending == 1 ? '' : 's'} waiting to be sent',
-            problem: s.sync.lastError.isEmpty
+            problem: s.sync.noNetwork
+                ? 'This device has no internet, so only downloaded episodes play. It syncs by itself as soon as the server answers.'
+                : s.sync.offline
+                ? "Can't reach the server, but this device is online: podcasts still stream from their own sites, while videos need the server. It syncs by itself as soon as the server answers."
+                : s.sync.lastError.isEmpty
                 ? ''
-                : (s.sync.lastError.contains('SocketException') ? "Can't reach the server. It tries again by itself." : 'Last error: ${s.sync.lastError}'),
+                : 'Last error: ${s.sync.lastError}',
             action: Padding(
               padding: const EdgeInsets.only(right: 8),
               child: FilledButton.tonal(onPressed: s.sync.running ? null : s.sync.syncNow, child: const Text('Sync now')),
@@ -232,10 +257,20 @@ class _StatusScreenState extends State<StatusScreen> {
           ),
         ],
       ),
-      if (d.active.isNotEmpty || d.waiting.isNotEmpty || d.skipped.isNotEmpty || d.failed.isNotEmpty)
+      if (s.lib.device.downloadsPaused || d.active.isNotEmpty || d.waiting.isNotEmpty || d.skipped.isNotEmpty || d.failed.isNotEmpty)
         Section(
           title: 'Downloads',
           children: [
+            if (s.lib.device.downloadsPaused)
+              _row(
+                leading: Icon(Icons.pause_circle_outline_rounded, color: cs.primary),
+                title: 'Downloads paused',
+                detail: 'Nothing downloads by itself until you resume. Download on an episode still does.',
+                action: Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: FilledButton.tonal(onPressed: () => d.setPaused(false), child: const Text('Resume')),
+                ),
+              ),
             for (final a in d.active.values)
               _row(
                 leading: Icon(Icons.downloading_rounded, color: cs.primary),
@@ -469,14 +504,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, dynamic>? server;
   bool serverLocked = false;
   List<dynamic> devices = [];
+  Link? _watched;
+  bool _loading = false;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (server == null) _load();
+    final link = Scope.of(context).api.link;
+    if (link == _watched) return;
+    _watched?.removeListener(_onLink);
+    _watched = link..addListener(_onLink);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _watched?.removeListener(_onLink);
+    super.dispose();
+  }
+
+  // Ask again each time the server answers after being offline, so nothing shown is stale.
+  Reach _was = Reach.unknown;
+  void _onLink() {
+    final now = _watched!.reach;
+    if (now == Reach.online && (_was == Reach.offline || server == null)) _load();
+    _was = now;
   }
 
   Future<void> _load() async {
+    if (_loading) return;
+    _loading = true;
     final s = Scope.of(context);
     try {
       final r = (await s.api.get('/settings') as Map).cast<String, dynamic>();
@@ -488,7 +545,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           devices = d;
         });
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      _loading = false;
+    }
   }
 
   Future<void> _open(Widget page) async {
@@ -514,9 +574,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return Scaffold(
       appBar: rootBar(context, 'Settings'),
       body: ListenableBuilder(
-        listenable: Listenable.merge([s.lib, s.downloads]),
+        listenable: Listenable.merge([s.lib, s.downloads, s.api.link]),
         builder: (context, _) {
           final prefs = s.lib.prefs;
+          final offline = s.api.link.offline;
+          final missing = offline ? 'Not reachable right now' : 'Loading…';
           final dev = s.lib.device;
           return Readable(
             builder: (context, inset) => ListView(
@@ -536,13 +598,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 Section(
                   title: 'This device',
-                  footer: 'Kept on this device only. Each playlist chooses whether to download, from its own page.',
+                  footer: 'Kept on this device only. Each playlist chooses whether to download, from Keep offline on its page.',
                   children: [
+                    SwitchListTile(
+                      secondary: IconTile(icon: Icons.pause_rounded, color: brand, size: 38),
+                      title: const Text('Pause downloads'),
+                      subtitle: const Text('For a hotspot or roaming. Download on an episode still works.'),
+                      value: dev.downloadsPaused,
+                      onChanged: (v) => s.downloads.setPaused(v),
+                    ),
                     _link(
                       icon: Icons.download_rounded,
                       title: 'Downloads and storage',
                       detail:
-                          '${megabytes(s.downloads.used)} used${dev.storageMb > 0 ? ' of ${megabytes(dev.storageMb * 1048576)}' : ''}${dev.wifiOnly ? ' · Wi-Fi only' : ''}',
+                          '${megabytes(s.downloads.used)} used${dev.storageMb > 0 ? ' of ${megabytes(dev.storageMb * 1048576)}' : ''}${dev.wifiOnly ? ' · Wi-Fi only' : ''}${dev.downloadsPaused ? ' · Paused' : ''}',
                       onTap: () => _open(const _DeviceScreen()),
                     ),
                   ],
@@ -554,18 +623,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     _link(
                       icon: Icons.dns_rounded,
                       title: 'Server defaults',
-                      detail: sv == null
-                          ? 'Not reachable right now'
+                      detail: sv == null || offline
+                          ? missing
                           : serverLocked
                           ? 'Locked on this server'
                           : 'For every podcast that leaves a setting empty',
-                      onTap: sv == null ? null : () => _open(_ServerScreen(sv, locked: serverLocked)),
+                      onTap: sv == null || offline ? null : () => _open(_ServerScreen(sv, locked: serverLocked)),
                     ),
                     _link(
                       icon: Icons.devices_rounded,
                       title: 'Devices',
-                      detail: sv == null ? 'Not reachable right now' : '${devices.length} signed in',
-                      onTap: sv == null ? null : () => _open(_DevicesScreen(devices)),
+                      detail: sv == null || offline ? missing : '${devices.length} signed in',
+                      onTap: sv == null || offline ? null : () => _open(_DevicesScreen(devices)),
                     ),
                   ],
                 ),
@@ -618,6 +687,7 @@ class _PrefsScreen extends StatefulWidget {
 class _PrefsScreenState extends State<_PrefsScreen> {
   TextEditingController? _back, _forward, _next, _zone;
   String? _theme;
+  bool? _remember, _background, _landscape;
 
   @override
   Widget build(BuildContext context) {
@@ -628,9 +698,14 @@ class _PrefsScreenState extends State<_PrefsScreen> {
     final next = _next ??= TextEditingController(text: '${prefs.nextAt}');
     final zone = _zone ??= TextEditingController(text: prefs.timeZone);
     final theme = _theme ?? prefs.theme;
+    final remember = _remember ?? prefs.rememberSpeed;
+    final background = _background ?? s.lib.device.videoInBackground;
+    final landscape = _landscape ?? s.lib.device.videoLandscape;
     return _Form(
       title: 'Playback and theme',
       onSave: () async {
+        await s.lib.saveDevice(s.lib.device.withVideo(background: background, landscape: landscape));
+        if (!context.mounted) return;
         final ok = await s.act(
           context,
           (api) => api.post('/settings/prefs', {
@@ -639,6 +714,7 @@ class _PrefsScreenState extends State<_PrefsScreen> {
             'skip_forward': forward.text,
             'next_at': next.text,
             'theme': theme,
+            'remember_speed': remember ? '1' : '0',
           }),
           done: 'Saved',
         );
@@ -666,6 +742,30 @@ class _PrefsScreenState extends State<_PrefsScreen> {
             NumberRow(label: 'Skip forward', controller: forward, unit: 's', hint: '30', enabled: true),
           ],
         ),
+        Section(
+          title: 'Speed',
+          footer: 'Changing the speed while an episode plays saves it as that podcast’s speed, on every device.',
+          children: [SwitchListTile(title: const Text('Remember speed for each podcast'), value: remember, onChanged: (v) => setState(() => _remember = v))],
+        ),
+        if (!isDesktop)
+          Section(
+            title: 'Video',
+            footer: 'On this device only.',
+            children: [
+              SwitchListTile(
+                title: const Text('Keep playing in the background'),
+                subtitle: const Text('The sound plays on when you leave the app.'),
+                value: background,
+                onChanged: (v) => setState(() => _background = v),
+              ),
+              SwitchListTile(
+                title: const Text('Full screen in landscape'),
+                subtitle: const Text('Full screen turns the picture sideways.'),
+                value: landscape,
+                onChanged: (v) => setState(() => _landscape = v),
+              ),
+            ],
+          ),
         Section(
           title: 'Next episode',
           footer: 'In a playlist, a Next button shows in this last part of an episode. It marks the episode played and starts the next one.',
@@ -730,7 +830,7 @@ class _DeviceScreenState extends State<_DeviceScreen> {
       children: [
         Section(
           title: 'Storage',
-          footer: 'Nothing downloads unless a playlist is set to download on this device, from the download button on its page.',
+          footer: 'Nothing downloads unless a playlist is kept offline, from Keep offline on its page.',
           children: [
             NumberRow(label: 'Storage limit', controller: storage, unit: 'MB', hint: 'none', enabled: true),
             if (!isDesktop) SwitchListTile(title: const Text('Download on Wi-Fi only'), value: wifi, onChanged: (v) => setState(() => _wifi = v)),

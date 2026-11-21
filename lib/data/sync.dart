@@ -3,7 +3,7 @@ library;
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 
 import 'api.dart';
 import 'db.dart';
@@ -18,8 +18,16 @@ class SyncService extends ChangeNotifier {
 
   bool running = false;
   DateTime? lastSync;
+
+  /// Why the last sync failed; kept while the next one runs, and cleared only when one works.
   String lastError = '';
   int pending = 0;
+
+  /// The server can't be reached right now, so nothing it streams will play.
+  bool get offline => api.link.offline;
+
+  /// The device has no internet at all, so only downloads play.
+  bool get noNetwork => api.link.noNetwork;
 
   /// Runs after each successful sync, so downloads can follow the new state.
   Future<void> Function()? afterSync;
@@ -28,6 +36,16 @@ class SyncService extends ChangeNotifier {
   Timer? _every;
   Completer<void>? _queued;
   Duration _backoff = const Duration(seconds: 30);
+  AppLifecycleListener? _life;
+  Reach _was = Reach.unknown;
+
+  // Any request that gets through after being offline means the connection is back.
+  void _onLink() {
+    final now = api.link.reach;
+    if (_was == Reach.offline && now == Reach.online && !running) unawaited(syncNow());
+    _was = now;
+    notifyListeners();
+  }
 
   Future<void> start() async {
     final last = await db.get('last_sync');
@@ -40,6 +58,8 @@ class SyncService extends ChangeNotifier {
       _soon = Timer(const Duration(seconds: 5), syncNow);
     };
     _every = Timer.periodic(const Duration(minutes: 15), (_) => syncNow());
+    api.link.addListener(_onLink);
+    _life = AppLifecycleListener(onResume: () => unawaited(syncNow()));
     unawaited(syncNow());
   }
 
@@ -47,13 +67,14 @@ class SyncService extends ChangeNotifier {
   void dispose() {
     _soon?.cancel();
     _every?.cancel();
+    _life?.dispose();
+    api.link.removeListener(_onLink);
     super.dispose();
   }
 
   Future<void> syncNow() async {
     if (running) return (_queued ??= Completer<void>()).future;
     running = true;
-    lastError = '';
     notifyListeners();
     try {
       final todo = await db.pending();
@@ -82,6 +103,7 @@ class SyncService extends ChangeNotifier {
       if (pulled > 0) await db.event('sync', 'Received $pulled updates');
       pending = await db.pendingCount();
       _backoff = const Duration(seconds: 30);
+      lastError = '';
       // Downloads can take minutes to start, so they must not hold up the next sync.
       if (afterSync != null) unawaited(afterSync!().catchError((Object e) => db.event('download', 'Planning downloads failed: $e')));
     } on ApiError catch (e) {
@@ -112,6 +134,7 @@ class SyncService extends ChangeNotifier {
     _soon?.cancel();
     _soon = Timer(_backoff, syncNow);
     final next = _backoff * 2;
-    _backoff = next > const Duration(minutes: 15) ? const Duration(minutes: 15) : next;
+    final most = offline ? const Duration(minutes: 2) : const Duration(minutes: 15);
+    _backoff = next > most ? most : next;
   }
 }

@@ -25,6 +25,9 @@ class DownloadState {
 
   /// The task that failed, kept so it can pick up where it stopped.
   DownloadTask? task;
+
+  /// Where the finished file lands, so a finish the downloader didn't report can still be seen.
+  String path = '';
 }
 
 class Downloads extends ChangeNotifier {
@@ -48,6 +51,15 @@ class Downloads extends ChangeNotifier {
 
   /// Whether a failed download is tried again by itself after the next sync.
   bool retriesItself(int id) => (_tries[id] ?? 0) < _autoTries;
+
+  /// Waiting their turn in this app, in order, each with the reason it was asked for; [_running] are handed to the downloader.
+  final List<(Episode, String)> _queue = [];
+  final Set<int> _running = {};
+  final Set<int> _finishing = {};
+
+  /// Automatic downloads stopped part way by Pause downloads, kept to resume from where they were.
+  final Map<int, DownloadState> _held = {};
+  Timer? _check;
 
   bool _planning = false;
   bool _ready = false;
@@ -81,7 +93,8 @@ class Downloads extends ChangeNotifier {
   }
 
   Future<void> _loadHeld() async {
-    final rows = await db.downloads();
+    var rows = await db.downloads();
+    if (await _relink(rows)) rows = await db.downloads();
     sizes = {for (final r in rows) r['episode'] as int: r['size'] as int};
     pinned = {
       for (final r in rows)
@@ -90,12 +103,37 @@ class Downloads extends ChangeNotifier {
     lib.setDownloaded({for (final r in rows) r['episode'] as int: r['path'] as String});
   }
 
+  // iOS gives the app a new container folder on each update, so a file's saved full path goes stale while the file stays.
+  Future<bool> _relink(List<Map<String, Object?>> rows) async {
+    final folders = {folder, await _defaultFolder()};
+    var moved = 0;
+    for (final r in rows) {
+      final old = r['path'] as String;
+      if (await File(old).exists()) continue;
+      for (final dir in folders) {
+        final now = p.join(dir, p.basename(old));
+        if (now == old || !await File(now).exists()) continue;
+        await db.moveDownload(r['episode'] as int, now);
+        moved++;
+        break;
+      }
+    }
+    if (moved > 0) await db.event('download', 'Found $moved downloaded episodes again after the app moved its folder');
+    return moved > 0;
+  }
+
   Future<void> _limit(int n) async {
     if (n < 1 || n == atOnce) return;
     await FileDownloader().configure(globalConfig: (Config.holdingQueue, (n, null, null)));
     atOnce = n;
     await db.put('downloads_at_once', '$n');
+    for (final (e, _) in _queue) {
+      active[e.id]?.waiting = _queuedText;
+    }
+    await _pump();
   }
+
+  String get _queuedText => 'queued (${atOnce < 1 ? 4 : atOnce} at a time)';
 
   // Asked for after each sync, when the server has just answered; without an answer the last known limit stays.
   Future<void> _followServerLimit() async {
@@ -187,7 +225,7 @@ class Downloads extends ChangeNotifier {
           await remove(id, 'no longer in a downloaded playlist');
         }
       }
-      for (final id in active.keys.toList()) {
+      for (final id in {...active.keys, ..._held.keys}) {
         if (wantIds.contains(id) || pinned.contains(id)) continue;
         await cancel(id);
         await db.event('download', 'Cancelled "${lib.byId[id]?.title ?? id}": no longer in a downloaded playlist');
@@ -196,8 +234,21 @@ class Downloads extends ChangeNotifier {
       for (final e in over) {
         waiting[e.id] = DownloadState(e.id)..waiting = 'storage limit';
       }
+      final paused = lib.device.downloadsPaused;
+      if (paused) await _holdAll();
       for (final e in want) {
         if (sizes.containsKey(e.id) || active.containsKey(e.id)) continue;
+        if (paused) {
+          if (failed.containsKey(e.id)) continue;
+          final at = _held[e.id]?.progress ?? 0;
+          waiting[e.id] = DownloadState(e.id)..waiting = at > 0 ? 'downloads paused at ${(at * 100).round()}%' : 'downloads paused';
+          continue;
+        }
+        final held = _held.remove(e.id);
+        if (held != null) {
+          await _resume(e, held);
+          continue;
+        }
         // A sync just worked, so the connection is back: the moment to try failures again.
         if (!failed.containsKey(e.id)) {
           await _enqueue(e, 'in a downloaded playlist');
@@ -213,6 +264,58 @@ class Downloads extends ChangeNotifier {
       _replan = false;
       await reconcile();
     }
+  }
+
+  /// Stops automatic downloads, holding those part way, or lets them carry on; a tap on Download still downloads.
+  Future<void> setPaused(bool paused) async {
+    await lib.saveDevice(lib.device.withPaused(paused));
+    await db.event('download', paused ? 'Downloads paused' : 'Downloads resumed');
+    await reconcile();
+    await _pump();
+  }
+
+  /// Asks the downloader, not just this app, as downloads started before the app did run on unseen.
+  Future<void> _holdAll() async {
+    final ids = {
+      ...active.keys,
+      for (final t in await FileDownloader().allTasks())
+        if (t.metaData != 'pinned') ?int.tryParse(t.taskId),
+    };
+    for (final id in ids) {
+      if (!pinned.contains(id) && !_held.containsKey(id)) await _hold(id);
+    }
+  }
+
+  /// Pauses a running download so it can resume; one not yet running is cancelled, as nothing is lost.
+  Future<void> _hold(int id) async {
+    final st = active.remove(id) ?? DownloadState(id);
+    _queue.removeWhere((q) => q.$1.id == id);
+    _running.remove(id);
+    final rec = await FileDownloader().database.recordForId('$id');
+    final task = rec?.task ?? await FileDownloader().taskForId('$id');
+    if (task is! DownloadTask) {
+      if (task != null) await FileDownloader().cancelTaskWithId('$id');
+      return;
+    }
+    if (rec != null && st.progress == 0) st.progress = rec.progress.clamp(0, 1);
+    // Held before pausing, so the downloader's paused report doesn't bring it back.
+    _held[id] = st..task = task;
+    if (rec?.status == TaskStatus.paused) return;
+    if (rec?.status == TaskStatus.running && await FileDownloader().pause(task)) return;
+    _held.remove(id);
+    await FileDownloader().cancelTaskWithId('$id');
+  }
+
+  Future<void> _resume(Episode e, DownloadState st) async {
+    final task = st.task;
+    if (task == null || !await FileDownloader().resume(task)) {
+      await FileDownloader().cancelTaskWithId('${e.id}');
+      return _enqueue(e, 'downloads resumed');
+    }
+    active[e.id] = st..waiting = 'resuming';
+    _running.add(e.id);
+    _watch();
+    await db.event('download', 'Resumed "${e.title}" at ${(st.progress * 100).round()}%: downloads resumed');
   }
 
   /// Download on one episode keeps it until it is played.
@@ -244,26 +347,50 @@ class Downloads extends ChangeNotifier {
       active[id] = DownloadState(id)
         ..progress = st!.progress
         ..expectedBytes = st.expectedBytes
+        ..path = st.path
         ..waiting = 'resuming';
+      _running.add(id);
+      _watch();
       await db.event('download', 'Resumed "${e.title}" at ${(st.progress * 100).round()}%: $reason');
       return;
     }
     await _enqueue(e, reason);
   }
 
+  /// Puts a download in line; it starts once fewer than [atOnce] are running.
   Future<void> _enqueue(Episode e, String reason) async {
-    final st = DownloadState(e.id);
-    active[e.id] = st;
+    active[e.id] = DownloadState(e.id)..waiting = _queuedText;
+    _queue.add((e, reason));
+    notifyListeners();
+    await _pump();
+  }
+
+  /// Hands queued downloads to the downloader while there is room.
+  Future<void> _pump() async {
+    while (_queue.isNotEmpty && _running.length < (atOnce < 1 ? 4 : atOnce)) {
+      final (e, reason) = _queue.removeAt(0);
+      if (!active.containsKey(e.id)) continue;
+      _running.add(e.id);
+      await _start(e, reason);
+    }
+    notifyListeners();
+  }
+
+  Future<void> _start(Episode e, String reason) async {
+    final st = active[e.id] ?? (active[e.id] = DownloadState(e.id));
+    st.waiting = 'starting';
     notifyListeners();
     try {
       var url = e.mediaUrl;
       var size = e.size;
-      if (!e.direct) {
+      // A server from before podcast videos were streamed answers with the enclosure itself.
+      if (e.streamed) {
         final link = await api.get('/episodes/${e.id}/stream', {'download': '1'}) as Map;
         url = api.absolute('${link['url']}');
-        size = (link['size'] as num?)?.toInt() ?? 0;
+        size = (link['size'] as num?)?.toInt() ?? size;
       }
-      final ext = e.direct ? (p.extension(Uri.parse(url).path).isEmpty ? '.mp3' : p.extension(Uri.parse(url).path)) : '.mp4';
+      final own = p.extension(Uri.parse(url).path);
+      final ext = url.startsWith(api.base) ? '.mp4' : (own.isEmpty || own.length > 5 ? (e.media == 'video' ? '.mp4' : '.mp3') : own);
       final task = DownloadTask(
         taskId: '${e.id}',
         url: url,
@@ -280,22 +407,66 @@ class Downloads extends ChangeNotifier {
         retries: 6,
         metaData: pinned.contains(e.id) ? 'pinned' : '',
       );
-      await FileDownloader().enqueue(task);
+      st.path = p.join(folder, task.filename);
+      // Logged first, as a short audio file can finish before enqueue returns.
       await db.event('download', 'Started "${e.title}": $reason');
+      if (!await FileDownloader().enqueue(task)) throw StateError('the downloader refused it');
+      _watch();
     } catch (err) {
       active.remove(e.id);
+      _running.remove(e.id);
       failed[e.id] = st..error = '$err';
       await db.event('download', 'Failed "${e.title}": $err');
       notifyListeners();
     }
   }
 
+  // The downloader doesn't always report a finish while the app runs; a running download whose task is gone and whose file is there has finished.
+  void _watch() {
+    _check ??= Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (_running.isEmpty) {
+        _check?.cancel();
+        _check = null;
+        return;
+      }
+      for (final id in _running.toList()) {
+        final st = active[id];
+        if (st == null || st.path.isEmpty || !await File(st.path).exists()) continue;
+        if (await FileDownloader().taskForId('$id') != null) continue;
+        await _completed(id, st.path, pinned.contains(id));
+      }
+    });
+  }
+
+  Future<void> _completed(int id, String path, bool pin) async {
+    if ((sizes.containsKey(id) && !active.containsKey(id)) || !_finishing.add(id)) return;
+    try {
+      active.remove(id);
+      _running.remove(id);
+      final size = await File(path).length();
+      await db.saveDownload(id, path, size, pinned: pin);
+      _tries.remove(id);
+      await db.event('download', 'Downloaded "${lib.byId[id]?.title ?? 'episode $id'}" (${(size / 1048576).toStringAsFixed(1)} MB)');
+      await _loadHeld();
+    } finally {
+      _finishing.remove(id);
+    }
+    await _pump();
+  }
+
   Future<void> _onUpdate(TaskUpdate u) async {
     final id = int.tryParse(u.task.taskId);
     if (id == null) return;
-    final st = active.putIfAbsent(id, () => DownloadState(id));
     if (u.task.metaData == 'pinned') pinned.add(id);
+    if (_held.containsKey(id)) return;
+    if (lib.device.downloadsPaused && u.task.metaData != 'pinned' && !pinned.contains(id)) {
+      if (u is TaskStatusUpdate && !u.status.isFinalState) await _hold(id);
+      if (u is! TaskStatusUpdate || !u.status.isFinalState) return;
+    }
     if (u is TaskProgressUpdate) {
+      // A late progress report must not bring back a download that has finished.
+      final st = active[id];
+      if (st == null) return;
       st.progress = u.progress.clamp(0, 1);
       if (u.hasExpectedFileSize) st.expectedBytes = u.expectedFileSize;
       if (u.hasNetworkSpeed) st.speedMBps = u.networkSpeed;
@@ -304,35 +475,40 @@ class Downloads extends ChangeNotifier {
     }
     if (u is! TaskStatusUpdate) return;
     final title = lib.byId[id]?.title ?? 'episode $id';
-    switch (u.status) {
-      case TaskStatus.complete:
-        active.remove(id);
-        final path = await u.task.filePath();
-        final size = await File(path).length();
-        await db.saveDownload(id, path, size, pinned: u.task.metaData == 'pinned');
-        _tries.remove(id);
-        await db.event('download', 'Downloaded "$title" (${(size / 1048576).toStringAsFixed(1)} MB)');
-        await _loadHeld();
-      case TaskStatus.failed || TaskStatus.notFound:
-        active.remove(id);
+    final task = u.task;
+    if (u.status == TaskStatus.complete) return _completed(id, await task.filePath(), task.metaData == 'pinned');
+    if (u.status.isFinalState) {
+      final st = active.remove(id) ?? DownloadState(id);
+      _running.remove(id);
+      if (u.status != TaskStatus.canceled) {
         failed[id] = st
           ..error = u.exception?.description ?? u.status.name
-          ..task = u.task is DownloadTask ? u.task as DownloadTask : null;
+          ..task = task is DownloadTask ? task : null;
         // A file that isn't there won't appear by asking again.
         if (u.status == TaskStatus.notFound) _tries[id] = _autoTries;
         await db.event(
           'download',
           'Failed "$title" at ${(st.progress * 100).round()}%: ${st.error}${retriesItself(id) ? '; it is tried again after the next sync' : ''}',
         );
-      case TaskStatus.canceled:
-        active.remove(id);
+      }
+      await _pump();
+      return;
+    }
+    // A late report about a download that has finished must not bring it back.
+    if (_finishing.contains(id) || (sizes.containsKey(id) && !active.containsKey(id))) return;
+    // A download still running from before the app started counts towards those at once.
+    final st = active.putIfAbsent(id, () => DownloadState(id));
+    if (st.path.isEmpty && task is DownloadTask) st.path = p.join(task.directory, task.filename);
+    _running.add(id);
+    _watch();
+    switch (u.status) {
       case TaskStatus.waitingToRetry:
         st.waiting = 'connection lost, retrying shortly';
       case TaskStatus.paused:
         st.waiting = 'paused, resumes by itself';
       case TaskStatus.enqueued:
-        st.waiting = lib.device.wifiOnly ? 'queued (Wi-Fi only)' : 'queued ($atOnce at a time)';
-      case TaskStatus.running:
+        st.waiting = lib.device.wifiOnly ? 'queued (Wi-Fi only)' : _queuedText;
+      default:
         st.waiting = '';
     }
     notifyListeners();
@@ -352,9 +528,11 @@ class Downloads extends ChangeNotifier {
   }
 
   Future<void> cancel(int id) async {
-    await FileDownloader().cancelTaskWithId('$id');
+    _queue.removeWhere((q) => q.$1.id == id);
+    if (_running.remove(id) | (_held.remove(id) != null)) await FileDownloader().cancelTaskWithId('$id');
     active.remove(id);
     notifyListeners();
+    await _pump();
   }
 
   // background_downloader's first-run migration needs the Documents folder, which Linux lacks without xdg-user-dirs, and then never becomes ready.
