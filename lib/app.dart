@@ -183,7 +183,7 @@ class _PodcastsAppState extends State<PodcastsApp> {
       builder: (context, _) {
         final theme = s?.lib.prefs.theme ?? 'system';
         return MaterialApp(
-          title: 'Podcasts',
+          title: 'rPodcasts',
           debugShowCheckedModeBanner: false,
           themeMode: theme == 'dark' ? ThemeMode.dark : (theme == 'light' ? ThemeMode.light : ThemeMode.system),
           theme: lightTheme,

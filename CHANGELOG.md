@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 (2026-11-21)
 
+- Fixed Android stopping playback, audio and video, soon after leaving the app, with no player in the notification shade: the release build had dropped the media control icons, so the phone never treated the app as playing.
+- Android: a sharp app icon that fills the launcher's shape (and follows themed icons on Android 13+), and the app's silhouette in the media player instead of a white square.
+- Fixed Can't reach the server (Connection attempt cancelled) after switching back to the app: one dropped connection no longer cancels the other requests in flight.
+- Status now shows when the phone's media controls fail, which stops playback when the app is left.
+- Status now lists playback trouble: errors, reopening a dropped stream, and pausing an episode that stood still.
+- The Linux and macOS desktop apps are now called rPodcasts, like Windows and Android.
 
 
 ## 1.2.0 (2026-11-21)

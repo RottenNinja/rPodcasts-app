@@ -108,11 +108,12 @@ class Api {
   Map<String, String> get _headers => {'Authorization': 'Bearer $token', 'Content-Type': 'application/json', 'User-Agent': 'podcasts-app'};
 
   // Pooled sockets may be dead after a network change, so the next request starts on new ones.
-  void _reconnect() {
-    final old = _io;
+  void _reconnect(HttpClient used) {
+    if (used != _io) return;
     _io = _fresh();
     _http = IOClient(_io);
-    old.close();
+    // Closing at once would cancel other requests still connecting on it; by then all have timed out.
+    Timer(const Duration(seconds: 35), used.close);
   }
 
   static bool _lost(Object e) => e is IOException || e is http.ClientException || e is TimeoutException;
@@ -121,13 +122,14 @@ class Api {
   Future<dynamic> _send(Future<http.Response> Function(http.Client c) call, {required bool idempotent}) async {
     for (var tries = idempotent ? 2 : 1; ; tries--) {
       final began = DateTime.now();
+      final used = _io;
       try {
         final r = await call(_http).timeout(const Duration(seconds: 30));
         link._set(Reach.online, '', network: true);
         return _decode(r);
       } on Object catch (e) {
         if (!_lost(e)) rethrow;
-        _reconnect();
+        _reconnect(used);
         if (tries == 1 || DateTime.now().difference(began) > const Duration(seconds: 2)) {
           link._set(Reach.offline, '$e', network: await Link._hasNetwork());
           throw Unreachable(e);

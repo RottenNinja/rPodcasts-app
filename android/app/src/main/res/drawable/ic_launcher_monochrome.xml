@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The notification silhouette inside the safe zone, for Android 13's themed icons. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android" android:drawable="@drawable/ic_notification" android:inset="22%"/>

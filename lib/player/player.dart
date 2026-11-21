@@ -395,11 +395,13 @@ class PlayerController extends ChangeNotifier {
     _stale = !_local;
     await e.pause();
     await _savePosition();
+    await _log('Paused at ${position}s: it said it was playing but stood still for 3 s');
     _shown();
   }
 
   void _playError(String err) {
     debugPrint('player error: $err');
+    unawaited(_log('Error at ${position}s: $err'));
     // A joined stream can't be seeked in; the player says so and plays on.
     if (err.contains('force-seekable') || err.contains('Cannot seek in this stream')) return;
     // A dropped connection plays on from what is buffered, so it is opened again now, or on Play when paused.
@@ -424,8 +426,11 @@ class PlayerController extends ChangeNotifier {
     _retries++;
     _retryFrom = position;
     debugPrint('player: reopening at ${_retryFrom}s (try $_retries)');
+    await _log('Reopening at ${_retryFrom}s (try $_retries of 3)');
     await _play(e, from: from, at: _retryFrom, keepSpeed: speed);
   }
+
+  Future<void> _log(String text) => lib.db.event('player', '"${episode?.title ?? ''}": $text');
 
   Future<void> _loadChapters(Episode e) async {
     final found = await fetchChapters(e);
@@ -694,7 +699,7 @@ class SystemControls extends BaseAudioHandler with SeekHandler {
   Future<void> stop() => c.close();
 }
 
-/// Connects the system media controls where the platform has them.
+/// Connects the system media controls where the platform has them; a failure shows on Status, as without them a phone stops playing in the background.
 Future<void> attachSystemControls(PlayerController c) async {
   if (kIsWeb || Platform.isLinux || Platform.isWindows) return;
   if (!isDesktop) {
@@ -702,14 +707,25 @@ Future<void> attachSystemControls(PlayerController c) async {
       await c._attachSession();
     } catch (e) {
       debugPrint('audio session unavailable: $e');
+      await c.lib.db.event('player', 'Audio session unavailable: $e');
     }
   }
   try {
     c.handler = await AudioService.init(
       builder: () => SystemControls(c),
-      config: const AudioServiceConfig(androidNotificationChannelId: 'ninja.rotten.rpodcast.playback', androidNotificationChannelName: 'Playback'),
+      config: const AudioServiceConfig(
+        androidNotificationChannelId: 'ninja.rotten.rpodcast.playback',
+        androidNotificationChannelName: 'Playback',
+        androidNotificationIcon: 'drawable/ic_notification',
+      ),
     );
+    // The plugin drops a failed playback-state update silently, and without one Android never keeps playback going in the background.
+    AudioService.asyncError.listen((e) {
+      debugPrint('system controls error: $e');
+      unawaited(c.lib.db.event('player', 'System media controls error: $e'));
+    });
   } catch (e) {
     debugPrint('system controls unavailable: $e');
+    await c.lib.db.event('player', 'System media controls unavailable, so playback stops in the background: $e');
   }
 }

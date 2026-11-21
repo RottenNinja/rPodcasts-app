@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- assets/logo/logo.svg without its background, shrunk into the adaptive icon's safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="1024" android:viewportHeight="1024">
+    <group android:pivotX="512" android:pivotY="544" android:scaleX="0.7" android:scaleY="0.7" android:translateY="-32">
+        <group android:translateY="-40">
+            <path android:pathData="M168,470 a150,150 0 0,0 0,200 M118,420 a215,215 0 0,0 0,300 M856,470 a150,150 0 0,1 0,200 M906,420 a215,215 0 0,1 0,300"
+                android:strokeColor="#2B1838" android:strokeWidth="22" android:strokeLineCap="round"/>
+            <path android:pathData="M300,412 C250,360 210,330 150,330 C190,370 210,400 236,420 C190,420 160,440 130,470 C200,470 250,460 300,450 Z"
+                android:fillColor="#7A3DB8" android:strokeColor="#2B1838" android:strokeWidth="20" android:strokeLineJoin="round"/>
+            <path android:pathData="M280,560 a232,232 0 1,0 464,0 a232,232 0 1,0 -464,0 Z" android:fillColor="#8A4FC8"/>
+            <group>
+                <clip-path android:pathData="M280,560 a232,232 0 1,0 464,0 a232,232 0 1,0 -464,0 Z"/>
+                <path android:pathData="M250,380 Q512,340 774,380 L774,452 Q512,412 250,452 Z"
+                    android:fillColor="#7036AE" android:strokeColor="#2B1838" android:strokeWidth="18"/>
+                <path android:pathData="M250,496 Q512,470 774,496 L774,600 Q640,578 512,612 Q384,578 250,600 Z"
+                    android:fillColor="#B48AE6" android:strokeColor="#2B1838" android:strokeWidth="18" android:strokeLineJoin="round"/>
+                <path android:pathData="M290,330 Q380,300 470,318"
+                    android:strokeColor="#A672DE" android:strokeWidth="22" android:strokeLineCap="round"/>
+            </group>
+            <path android:pathData="M280,560 a232,232 0 1,0 464,0 a232,232 0 1,0 -464,0 Z" android:strokeColor="#2B1838" android:strokeWidth="22"/>
+            <path android:pathData="M388,552 Q434,512 484,556 Q434,588 388,552 Z M636,552 Q590,512 540,556 Q590,588 636,552 Z"
+                android:fillColor="#FFFFFF" android:strokeColor="#2B1838" android:strokeWidth="12" android:strokeLineJoin="round"/>
+            <path android:pathData="M437,554 a15,15 0 1,0 30,0 a15,15 0 1,0 -30,0 Z M557,554 a15,15 0 1,0 30,0 a15,15 0 1,0 -30,0 Z" android:fillColor="#2B1838"/>
+            <path android:pathData="M380,506 L486,528 M644,506 L538,528" android:strokeColor="#2B1838" android:strokeWidth="16" android:strokeLineCap="round"/>
+            <path android:pathData="M266,560 C266,196 758,196 758,560" android:strokeColor="#2B1838" android:strokeWidth="58" android:strokeLineCap="round"/>
+            <path android:pathData="M266,560 C266,196 758,196 758,560" android:strokeColor="#C24A9A" android:strokeWidth="22" android:strokeLineCap="round"/>
+            <path android:pathData="M266,500 h8 a44,44 0 0,1 44,44 v88 a44,44 0 0,1 -44,44 h-8 a44,44 0 0,1 -44,-44 v-88 a44,44 0 0,1 44,-44 Z M750,500 h8 a44,44 0 0,1 44,44 v88 a44,44 0 0,1 -44,44 h-8 a44,44 0 0,1 -44,-44 v-88 a44,44 0 0,1 44,-44 Z"
+                android:fillColor="#C24A9A" android:strokeColor="#2B1838" android:strokeWidth="22"/>
+            <path android:pathData="M256,530 a10,10 0 0,1 10,10 v70 a10,10 0 0,1 -20,0 v-70 a10,10 0 0,1 10,-10 Z M740,530 a10,10 0 0,1 10,10 v70 a10,10 0 0,1 -20,0 v-70 a10,10 0 0,1 10,-10 Z"
+                android:fillColor="#E07BC0"/>
+            <path android:pathData="M352,724 Q512,800 672,724 Q650,790 600,812 L512,900 L424,812 Q374,790 352,724 Z"
+                android:fillColor="#A0287F" android:strokeColor="#2B1838" android:strokeWidth="20" android:strokeLineJoin="round"/>
+        </group>
+    </group>
+</vector>

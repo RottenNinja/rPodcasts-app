@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The logo as one-colour silhouette, as the status bar shows only the shape. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="1024" android:viewportHeight="1024">
+    <group android:translateY="-32">
+        <path android:pathData="M168,470 a150,150 0 0,0 0,200 M118,420 a215,215 0 0,0 0,300 M856,470 a150,150 0 0,1 0,200 M906,420 a215,215 0 0,1 0,300"
+            android:strokeColor="#FFFFFF" android:strokeWidth="44" android:strokeLineCap="round"/>
+        <path android:pathData="M266,560 C266,196 758,196 758,560" android:strokeColor="#FFFFFF" android:strokeWidth="64" android:strokeLineCap="round"/>
+        <path android:fillType="evenOdd" android:fillColor="#FFFFFF"
+            android:pathData="M290,560 a222,222 0 1,0 444,0 a222,222 0 1,0 -444,0 Z M376,552 Q434,500 496,556 Q434,600 376,552 Z M648,552 Q590,500 528,556 Q590,600 648,552 Z M352,724 Q512,800 672,724 Q650,790 600,812 L512,900 L424,812 Q374,790 352,724 Z"/>
+        <path android:fillColor="#FFFFFF" android:pathData="M266,490 h8 a54,54 0 0,1 54,54 v88 a54,54 0 0,1 -54,54 h-8 a54,54 0 0,1 -54,-54 v-88 a54,54 0 0,1 54,-54 Z M750,490 h8 a54,54 0 0,1 54,54 v88 a54,54 0 0,1 -54,54 h-8 a54,54 0 0,1 -54,-54 v-88 a54,54 0 0,1 54,-54 Z"/>
+    </group>
+</vector>

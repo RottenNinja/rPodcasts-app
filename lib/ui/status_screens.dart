@@ -338,7 +338,11 @@ class _StatusScreenState extends State<StatusScreen> {
             'events',
             events,
             (e) => _row(
-              leading: Icon(e['kind'] == 'sync' ? Icons.sync_rounded : Icons.download_outlined, size: 20),
+              leading: Icon(switch (e['kind']) {
+                'sync' => Icons.sync_rounded,
+                'player' => Icons.play_circle_outline_rounded,
+                _ => Icons.download_outlined,
+              }, size: 20),
               title: '${e['text']}',
               detail: '${e['kind']} · ${ago(DateTime.fromMillisecondsSinceEpoch(e['at'] as int))}',
             ),
